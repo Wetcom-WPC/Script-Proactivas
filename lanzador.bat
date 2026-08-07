@@ -1,21 +1,25 @@
 @echo off
 setlocal
 set "BASE_DIR=%~dp0"
+set "RESULT_FILE=%BASE_DIR%resultado.txt"
+
+:: --------------------------------------------------------------------------------
+:: PASO 0: Resolver la carpeta de resultados de esta corrida
+:: (resultados\<fecha>, o resultados\<fecha> (1), (2)... si ya se corrio hoy)
+:: --------------------------------------------------------------------------------
+for /f "usebackq delims=" %%d in (`cmd /c ""%BASE_DIR%runtime\pwsh.exe" -NoProfile -ExecutionPolicy Bypass -File "%BASE_DIR%src\Resolver-CarpetaResultados.ps1" -BaseDir "%BASE_DIR%.""`) do set "CARPETA_RESULTADOS=%%d"
+
+echo Resultados de esta corrida en: resultados\%CARPETA_RESULTADOS%
+echo.
 
 :: --------------------------------------------------------------------------------
 :: PASO 1: Recolección
 :: --------------------------------------------------------------------------------
-set "RESULT_FILE=%BASE_DIR%resultado.txt"
-IF EXIST "%RESULT_FILE%" (
-    echo Limpiando archivo de resultado anterior...
-    del "%RESULT_FILE%"
-)
-
 echo [PASO 1 de 3] - Ejecutando la recoleccion de datos de vSphere...
 echo (Se abrira una nueva ventana para este paso)
 echo.
 
-call "%BASE_DIR%src\run.bat"
+call "%BASE_DIR%src\run.bat" "%CARPETA_RESULTADOS%"
 
 :: Aquí usamos la sintaxis antigua pero segura para comprobar si run.bat falló
 IF ERRORLEVEL 1 (
@@ -32,7 +36,7 @@ echo [PASO 2 de 3] - Recoleccion finalizada. Ejecutando la conversion a Excel...
 echo (Se abrira una nueva ventana para este paso)
 echo.
 
-start "Paso 2: Conversion a Excel" /wait "%BASE_DIR%runtime\pwsh.exe" -ExecutionPolicy Bypass -File "%BASE_DIR%src\JSONtoExcels.ps1" 2>nul
+start "Paso 2: Conversion a Excel" /wait "%BASE_DIR%runtime\pwsh.exe" -ExecutionPolicy Bypass -File "%BASE_DIR%src\JSONtoExcels.ps1" -CarpetaResultados "%CARPETA_RESULTADOS%" 2>nul
 
 IF NOT EXIST "%RESULT_FILE%" (
     echo.
@@ -57,7 +61,7 @@ findstr /M /I /C:"_Proactiva" "%RESULT_FILE%" >nul && (
     echo [PASO 3 de 3] - REPORTE PROACTIVA DETECTADO.
     echo Ejecutando generacion de Anexo y Checklist...
     echo.
-    start "Paso 3: Generando Anexo" /wait "%BASE_DIR%runtime\pwsh.exe" -ExecutionPolicy Bypass -File "%BASE_DIR%src\proactivas-auto2.0.ps1" 2>nul
+    start "Paso 3: Generando Anexo" /wait "%BASE_DIR%runtime\pwsh.exe" -ExecutionPolicy Bypass -File "%BASE_DIR%src\proactivas-auto2.0.ps1" -CarpetaResultados "%CARPETA_RESULTADOS%" 2>nul
 ) || (
     echo.
     echo [INFO] No se encontro la marca "_Proactiva" en el resultado.
@@ -65,6 +69,10 @@ findstr /M /I /C:"_Proactiva" "%RESULT_FILE%" >nul && (
 )
 
 :end_script
+:: La lista de trabajo de esta corrida ya cumplio su funcion (pasos 1-3 la leyeron
+:: cuando la necesitaban); la borramos aca para que no quede dando vueltas.
+IF EXIST "%RESULT_FILE%" del "%RESULT_FILE%"
+
 echo.
 echo Proceso completado.
 pause

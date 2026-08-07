@@ -1,14 +1,28 @@
 #Author: Santiago Alvarez
 #Githb: SanntAlv
 
+param(
+    [string]$CarpetaResultados
+)
+
 if (-not (Get-Module -Name ImportExcel -ListAvailable)) {
     Install-Module -Name ImportExcel -Force -AllowClobber
 }
 
 $baseDir = Split-Path -Path $PSScriptRoot -Parent #raiz del repo (este script vive en src/)
+$directorioResultados = Join-Path -Path $baseDir -ChildPath "resultados"
 
-$fechaHoy = Get-Date -Format "yyyy-MM-dd"
-$logDir = Join-Path -Path $baseDir -ChildPath "resultados\$fechaHoy\logs"
+# Si no se pasa la carpeta (ej. corriendo este script suelto para depurar), usamos la mas
+# reciente. lanzador.bat siempre pasa la carpeta exacta de la corrida actual.
+if (-not $CarpetaResultados) {
+    $masReciente = Get-ChildItem -Path $directorioResultados -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($masReciente) { $CarpetaResultados = $masReciente.Name }
+}
+
+$directorioDia = Join-Path -Path $directorioResultados -ChildPath $CarpetaResultados
+
+$logDir = Join-Path -Path $directorioDia -ChildPath "logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_proactivas-auto.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
 
@@ -19,13 +33,12 @@ if (-not $path){
 $nombreCliente = Read-Host "Escriba el Nombre del cliente"
 $mes = Read-Host "Escriba el mes correspondiente a la tarea Proactiva (ej: Enero, Febrero...)"
 
-$rutaResultados = Join-Path -Path $baseDir -ChildPath "resultados"
 $rutaPlantilla = Join-Path -Path $baseDir -ChildPath "src\devops-powershell\templete\Checklist Proactiva Actualizada - Cliente - Mes.xlsx"
 
-$excelMasReciente = Get-ChildItem -Path $rutaResultados -Filter "*_Proactiva*.xlsx" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$excelMasReciente = Get-ChildItem -Path (Join-Path -Path $directorioDia -ChildPath "excel") -Filter "*_Proactiva*.xlsx" |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-# El Anexo/Checklist se guardan junto al Excel de origen (misma carpeta de fecha: resultados/<fecha>/anexo)
-$directorioDia = Split-Path -Path (Split-Path -Path $excelMasReciente.FullName -Parent) -Parent
+# El Anexo/Checklist se guardan junto al Excel de origen (misma carpeta de esta corrida: resultados/<carpeta>/anexo)
 $directorioAnexo = Join-Path -Path $directorioDia -ChildPath "anexo"
 if (-not (Test-Path $directorioAnexo)) { New-Item -ItemType Directory -Path $directorioAnexo -Force | Out-Null }
 

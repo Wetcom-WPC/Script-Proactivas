@@ -1,10 +1,25 @@
 #Author: Santiago Alvarez
 #Githb: SanntAlv
 
-$baseDir = Split-Path -Path $PSScriptRoot -Parent #raiz del repo (este script vive en src/)
+param(
+    [string]$CarpetaResultados
+)
 
-$fechaHoy = Get-Date -Format "yyyy-MM-dd"
-$logDir = Join-Path -Path $baseDir -ChildPath "resultados\$fechaHoy\logs"
+$baseDir = Split-Path -Path $PSScriptRoot -Parent #raiz del repo (este script vive en src/)
+$directorioResultados = Join-Path -Path $baseDir -ChildPath "resultados"
+
+# Si no se pasa la carpeta (ej. corriendo este script suelto para depurar), usamos la mas
+# reciente. lanzador.bat siempre pasa la carpeta exacta de la corrida actual.
+if (-not $CarpetaResultados) {
+    $masReciente = Get-ChildItem -Path $directorioResultados -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($masReciente) { $CarpetaResultados = $masReciente.Name }
+}
+
+$directorioDia = Join-Path -Path $directorioResultados -ChildPath $CarpetaResultados
+$directorioExcelFinal = Join-Path -Path $directorioDia -ChildPath "excel"
+
+$logDir = Join-Path -Path $directorioDia -ChildPath "logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_JSONtoExcels.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
 
@@ -28,19 +43,10 @@ if (-not (Test-Path $rutaArchivoResultado)) {
 
 $listaDeArchivosJson = Get-Content -Path $rutaArchivoResultado
 
+if (-not (Test-Path $directorioExcelFinal)) { New-Item -ItemType Directory -Path $directorioExcelFinal -Force | Out-Null }
+
 foreach ($nombreJson in $listaDeArchivosJson) {
     try {
-        # El nombre de archivo empieza con la fecha de la corrida (yyyy-MM-dd ...), la usamos
-        # para ubicar la carpeta resultados/<fecha>/ correspondiente.
-        if ($nombreJson -notmatch '^(\d{4}-\d{2}-\d{2})') {
-            Write-Warning "No se pudo determinar la fecha del archivo '$nombreJson'. Omitiendo."
-            continue
-        }
-        $fechaCorrida = $Matches[1]
-        $directorioDia = Join-Path -Path $baseDir -ChildPath "resultados\$fechaCorrida"
-        $directorioExcelFinal = Join-Path -Path $directorioDia -ChildPath "excel"
-        if (-not (Test-Path $directorioExcelFinal)) { New-Item -ItemType Directory -Path $directorioExcelFinal -Force | Out-Null }
-
         $rutaJsonEntrada = Join-Path -Path $directorioDia -ChildPath "json\$nombreJson"
         if (-not (Test-Path $rutaJsonEntrada)) {
             Write-Warning "El archivo '$nombreJson' listado en resultado.txt no fue encontrado en la carpeta de reportes. Omitiendo."

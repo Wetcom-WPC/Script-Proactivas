@@ -1,9 +1,13 @@
+param(
+    [string]$CarpetaResultados = (Get-Date -Format "yyyy-MM-dd")
+)
 
 $directorioSrc = Split-Path -Path $PSScriptRoot -Parent
 $directorioRaiz = Split-Path -Path $directorioSrc -Parent
 
-$fechaHoy = Get-Date -Format "yyyy-MM-dd"
-$logDir = Join-Path -Path $directorioRaiz -ChildPath "resultados\$fechaHoy\logs"
+$global:CARPETA_RESULTADOS = $CarpetaResultados
+
+$logDir = Join-Path -Path $directorioRaiz -ChildPath "resultados\$CarpetaResultados\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_portable.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
 

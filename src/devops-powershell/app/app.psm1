@@ -7,8 +7,13 @@ If (Test-Path "$CURRENT_FOLDER/config_dev.json") {
 $global:PLUGINS_MODULES = @()
 $global:APP_VERSION = "v2.0.1ovw"
 
-# Los resultados de cada corrida se agrupan por fecha (resultados/<yyyy-MM-dd>/) en la raiz del proyecto.
-$global:CONFIG.REPORTS_FOLDER = Join-Path -Path $global:CONFIG.REPORTS_FOLDER -ChildPath (Get-Date -Format "yyyy-MM-dd")
+# Los resultados de cada corrida se agrupan en resultados/<carpeta de esta corrida>/ en la raiz
+# del proyecto. $global:CARPETA_RESULTADOS lo define portable.ps1 (fecha, o fecha + " (N)" si ya
+# se corrio hoy); si el modulo se carga sin pasar por portable.ps1, usamos la fecha de hoy.
+if (-not $global:CARPETA_RESULTADOS) {
+    $global:CARPETA_RESULTADOS = Get-Date -Format "yyyy-MM-dd"
+}
+$global:CONFIG.REPORTS_FOLDER = Join-Path -Path $global:CONFIG.REPORTS_FOLDER -ChildPath $global:CARPETA_RESULTADOS
 if (-not (Test-Path $global:CONFIG.REPORTS_FOLDER)) {
     New-Item -ItemType Directory -Path $global:CONFIG.REPORTS_FOLDER -Force | Out-Null
 }
