@@ -5,7 +5,11 @@ if (-not (Get-Module -Name ImportExcel -ListAvailable)) {
     Install-Module -Name ImportExcel -Force -AllowClobber
 }
 
-$baseDir = $PSScriptRoot 
+$baseDir = $PSScriptRoot
+
+$logDir = Join-Path -Path $baseDir -ChildPath "logs"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_proactivas-auto.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
 
 if (-not $path){
     $path = (Get-Item -Path ".\" -Verbose).FullName
@@ -2347,7 +2351,7 @@ foreach ($tarea in $tareasSeleccionadas) {
         '1' { $tareasAejecutar.AddRange($tareasMensuales) }
         '2' { $tareasAejecutar.AddRange($tareasTrimestrales) }
         '3' { $tareasAejecutar.AddRange($tareasSemestrales) }
-        '4' { Write-Host "Saliendo del script."; exit }
+        '4' { Write-Host "Saliendo del script."; Stop-Transcript | Out-Null; exit }
         default { Write-Host "Opcion no válida: '$($tarea.Trim())'" }
     }
 }
@@ -2361,3 +2365,5 @@ if ($tareasAejecutar.Count -gt 0) {
 
 Write-Host "Proceso completado. Se ha creado un nuevo archivo Excel (Anexo) en: $archivoSalida"
 Write-Host "Proceso completado. Se ha creado un nuevo archivo Excel (Checklist) en: $rutaSalidaChecklist"
+
+Stop-Transcript | Out-Null

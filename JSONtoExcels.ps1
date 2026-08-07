@@ -1,10 +1,15 @@
 #Author: Santiago Alvarez
 #Githb: SanntAlv
 
-$baseDir = $PSScriath "resultado.txt"
-$directorioReportesJson = Join-Path -Path $baseDir -ChildPath "devops-powershell\reportes" 
+$baseDir = $PSScriptRoot #portable
+
+$logDir = Join-Path -Path $baseDir -ChildPath "logs"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_JSONtoExcels.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
+
+$directorioReportesJson = Join-Path -Path $baseDir -ChildPath "devops-powershell\reportes"
 $directorioExcelFinal   = Join-Path -Path $baseDir -ChildPath "devops-powershell\reportes\proactiva-excel"
-$rutaArchivoResultado = Join-Path -Path $baseDir -ChildP
+$rutaArchivoResultado = Join-Path -Path $baseDir -ChildPath "resultado.txt"
 try {
     Import-Module ImportExcel -ErrorAction Stop
 }
@@ -91,3 +96,5 @@ foreach ($nombreJson in $listaDeArchivosJson) {
 }
 
 Write-Host "`nConversión de todos los archivos finalizada."
+
+Stop-Transcript | Out-Null
