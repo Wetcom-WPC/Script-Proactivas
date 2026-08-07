@@ -11,7 +11,6 @@ Import-Module $CURRENT_FOLDER/reports.psm1
 Import-Module $CURRENT_FOLDER/ui.psm1
 Import-Module $CURRENT_FOLDER/plugins.psm1
 Import-Module $CURRENT_FOLDER/connections.psm1
-Import-Module Veeam.Backup.PowerShell
 
 
 

@@ -188,21 +188,6 @@ function Connect-Endpoints($modules) {
         }
     }
 
-    # =========================================================================
-    # BLOQUE 2: Conexión a Veeam
-    # =========================================================================
-    # Solo entramos si alguna de las tareas seleccionadas pide "veeam"
-    if ("veeam" -in $componentsNeeded) {
-        $veeamExists = $Global:connections | Where-Object { $_.component -eq "veeam" }
-        
-        if ($veeamExists) {
-            # Llamamos a nuestra función especializada
-            $veeamResult = Connect-VeeamEndpoints
-            
-            if (-not $veeamResult) { $result = $false }
-        }
-    }
-
     return $result
 }
 
@@ -220,25 +205,12 @@ function Connect-Endpoints($modules) {
 	# }
 #}
 
-# La conexión real a Veeam ocurre dentro de VeeamBridge.ps1 (proceso aparte lanzado por
-# DatosVeeam.psm1), que pide sus propias credenciales. Acá solo confirmamos el componente
-# para que Start-DatosVeeam no aborte por falta de "conn".
-function Connect-VeeamEndpoints {
-    $veeamEndpoint = $Global:connections | Where-Object { $_.component -eq "veeam" }
-    if ($veeamEndpoint) {
-        $veeamEndpoint.conn = $true
-    }
-    return $true
-}
-
 function Disconnect-Endpoints {
     foreach ($conn in $global:connections) {
         if($conn.component -eq "vcenter"){
             # Desconecta VIServer (SOAP)
             Disconnect-VIServer -Server $conn.conn -Confirm:$false -ErrorAction SilentlyContinue
         }
-        # La sesión de Veeam vive y se cierra dentro del proceso aparte de VeeamBridge.ps1;
-        # acá no hay una sesión real que desconectar.
     }
     
     # --- [NUEVO] Desconecta todas las conexiones CIS (REST) ---
