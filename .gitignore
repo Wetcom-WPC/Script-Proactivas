@@ -1,14 +1,8 @@
-*.log
-*.txt
-*.zip
-*.json
+# Resultados generados por cada corrida (JSON, Excel, Anexo, logs) - no versionar
+resultados/
 
-devops-powershell/reportes/vds_configuration/
-devops-powershell/reportes/Anexo/
-devops-powershell/reportes/proactiva-excel/
-
-/resultado.txt
-
+# Cola de trabajo entre pasos del pipeline (se regenera en cada corrida)
 resultado.txt
 
-config.json
+*.log
+*.zip

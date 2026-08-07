@@ -44,7 +44,9 @@ function Start-DriverCollection($vcenters) {
     # --- [BLOQUE CORREGIDO] ---
     # 1. Se construye la ruta completa del archivo JSON y se guarda en una variable.
     $nombreJsonGenerado = (Get-Date).toString('yyyy-MM-dd HHmmss') + "_" + $file.Name + ".json"
-    $rutaJsonGenerado = Join-Path -Path $global:CONFIG.REPORTS_FOLDER -ChildPath $nombreJsonGenerado
+    $jsonDir = Join-Path -Path $global:CONFIG.REPORTS_FOLDER -ChildPath "json"
+    if (-not (Test-Path $jsonDir)) { New-Item -ItemType Directory -Path $jsonDir -Force | Out-Null }
+    $rutaJsonGenerado = Join-Path -Path $jsonDir -ChildPath $nombreJsonGenerado
 
     # 2. Se guarda el archivo JSON usando esa ruta.
     $file | ConvertTo-Json -Depth 99 | Set-Content -Path $rutaJsonGenerado

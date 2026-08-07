@@ -1,14 +1,13 @@
 #Author: Santiago Alvarez
 #Githb: SanntAlv
 
-$baseDir = $PSScriptRoot #portable
+$baseDir = Split-Path -Path $PSScriptRoot -Parent #raiz del repo (este script vive en src/)
 
-$logDir = Join-Path -Path $baseDir -ChildPath "logs"
+$fechaHoy = Get-Date -Format "yyyy-MM-dd"
+$logDir = Join-Path -Path $baseDir -ChildPath "resultados\$fechaHoy\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_JSONtoExcels.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
 
-$directorioReportesJson = Join-Path -Path $baseDir -ChildPath "devops-powershell\reportes"
-$directorioExcelFinal   = Join-Path -Path $baseDir -ChildPath "devops-powershell\reportes\proactiva-excel"
 $rutaArchivoResultado = Join-Path -Path $baseDir -ChildPath "resultado.txt"
 try {
     Import-Module ImportExcel -ErrorAction Stop
@@ -31,18 +30,29 @@ $listaDeArchivosJson = Get-Content -Path $rutaArchivoResultado
 
 foreach ($nombreJson in $listaDeArchivosJson) {
     try {
-        $rutaJsonEntrada = Join-Path -Path $directorioReportesJson -ChildPath $nombreJson
+        # El nombre de archivo empieza con la fecha de la corrida (yyyy-MM-dd ...), la usamos
+        # para ubicar la carpeta resultados/<fecha>/ correspondiente.
+        if ($nombreJson -notmatch '^(\d{4}-\d{2}-\d{2})') {
+            Write-Warning "No se pudo determinar la fecha del archivo '$nombreJson'. Omitiendo."
+            continue
+        }
+        $fechaCorrida = $Matches[1]
+        $directorioDia = Join-Path -Path $baseDir -ChildPath "resultados\$fechaCorrida"
+        $directorioExcelFinal = Join-Path -Path $directorioDia -ChildPath "excel"
+        if (-not (Test-Path $directorioExcelFinal)) { New-Item -ItemType Directory -Path $directorioExcelFinal -Force | Out-Null }
+
+        $rutaJsonEntrada = Join-Path -Path $directorioDia -ChildPath "json\$nombreJson"
         if (-not (Test-Path $rutaJsonEntrada)) {
             Write-Warning "El archivo '$nombreJson' listado en resultado.txt no fue encontrado en la carpeta de reportes. Omitiendo."
             continue # Salta al siguiente archivo de la lista
         }
 
         Write-Host "`nProcesando archivo: '$nombreJson'..." -ForegroundColor Yellow
-        
+
         # --- (Toda tu lógica de conversión ahora va DENTRO del bucle) ---
         $jsonData = Get-Content -Path $rutaJsonEntrada -Raw | ConvertFrom-Json
         $reportObject = $jsonData.Report
-        
+
         $nombreExcel = $nombreJson.Replace(".json", ".xlsx")
         $rutaExcelFinalCompleta = Join-Path -Path $directorioExcelFinal -ChildPath $nombreExcel
         

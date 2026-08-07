@@ -5,9 +5,10 @@ if (-not (Get-Module -Name ImportExcel -ListAvailable)) {
     Install-Module -Name ImportExcel -Force -AllowClobber
 }
 
-$baseDir = $PSScriptRoot
+$baseDir = Split-Path -Path $PSScriptRoot -Parent #raiz del repo (este script vive en src/)
 
-$logDir = Join-Path -Path $baseDir -ChildPath "logs"
+$fechaHoy = Get-Date -Format "yyyy-MM-dd"
+$logDir = Join-Path -Path $baseDir -ChildPath "resultados\$fechaHoy\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 Start-Transcript -Path (Join-Path -Path $logDir -ChildPath ("{0}_proactivas-auto.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))) | Out-Null
 
@@ -18,13 +19,18 @@ if (-not $path){
 $nombreCliente = Read-Host "Escriba el Nombre del cliente"
 $mes = Read-Host "Escriba el mes correspondiente a la tarea Proactiva (ej: Enero, Febrero...)"
 
-$rutaArchivos = Join-Path -Path $baseDir -ChildPath "devops-powershell\reportes\proactiva-excel"    
-$archivoSalida = "${baseDir}\devops-powershell\reportes\Anexo\Anexo Tecnico - ${nombreCliente} - ${mes}.xlsx"
-$rutaSalidaChecklist = "${baseDir}\devops-powershell\reportes\Anexo\Checklist Proactiva - ${nombreCliente} - ${mes}.xlsx"
-$rutaPlantilla = "${baseDir}\devops-powershell\reportes\templete\Checklist Proactiva Actualizada - Cliente - Mes.xlsx"
+$rutaResultados = Join-Path -Path $baseDir -ChildPath "resultados"
+$rutaPlantilla = Join-Path -Path $baseDir -ChildPath "src\devops-powershell\templete\Checklist Proactiva Actualizada - Cliente - Mes.xlsx"
 
+$excelMasReciente = Get-ChildItem -Path $rutaResultados -Filter "*_Proactiva*.xlsx" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-$excelMasReciente = Get-ChildItem -Path $rutaArchivos -Filter "*_Proactiva*.xlsx" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+# El Anexo/Checklist se guardan junto al Excel de origen (misma carpeta de fecha: resultados/<fecha>/anexo)
+$directorioDia = Split-Path -Path (Split-Path -Path $excelMasReciente.FullName -Parent) -Parent
+$directorioAnexo = Join-Path -Path $directorioDia -ChildPath "anexo"
+if (-not (Test-Path $directorioAnexo)) { New-Item -ItemType Directory -Path $directorioAnexo -Force | Out-Null }
+
+$archivoSalida = Join-Path -Path $directorioAnexo -ChildPath "Anexo Tecnico - ${nombreCliente} - ${mes}.xlsx"
+$rutaSalidaChecklist = Join-Path -Path $directorioAnexo -ChildPath "Checklist Proactiva - ${nombreCliente} - ${mes}.xlsx"
 
 $datosSalida = @()
 
