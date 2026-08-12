@@ -1393,9 +1393,15 @@ function Licencia {
 
 
 function NIOC {
-    $todosLosVDS = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "vDS"
-    }
+    # Si ningun vDS fue detectado en la recoleccion, JSONtoExcels.ps1 ni siquiera crea la hoja
+    # "vDS" (evita hojas vacias) -- Import-Excel tira error al buscarla. Es el mismo caso que
+    # "no hay vDS", asi que lo tratamos igual en vez de dejar pasar el error a la consola.
+    $todosLosVDS = @()
+    try {
+        $todosLosVDS = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "vDS" -ErrorAction Stop
+        }
+    } catch { $todosLosVDS = @() }
 
     $datosSalida = $todosLosVDS | Where-Object { $_."NIOC Enabled" -ne $true }
     
@@ -2204,9 +2210,14 @@ function backupCheck {
 function vdsBackupCheck {
     # 1. Importar datos de la hoja "Distributed Switch"
     # (Asegúrate que este sea el nombre de la hoja generado por tu script de exportación)
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "vDS"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    # Si no hay vDS, JSONtoExcels.ps1 no crea la hoja y Import-Excel tira error al buscarla;
+    # lo tratamos igual que "hoja vacia" (mismo caso que contempla el CASO 1 mas abajo).
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "vDS" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    } catch { $todosLosDatos = @() }
 
     # Ruta fija solicitada para el mensaje de éxito
     $rutaBackups = "...\devops-powershell\reportes\vds_configuration"
