@@ -765,22 +765,16 @@ class Proactiva {
             
             # F. Esperar y Validar
             Start-Sleep -Seconds 15
-            
-            $events = Get-VIEvent -Entity $targetDatastore -MaxSamples 50 -Server $serverContext | Where-Object { $_.FullFormattedMessage -like "*$alarmName*" }
-            
-            if ($events | Where-Object { $_ -is [VMware.Vim.AlarmScriptCompleteEvent] }) {
-                $reportResult = "SUCCESS"
-            } elseif ($events | Where-Object { $_ -is [VMware.Vim.AlarmScriptFailedEvent] }) {
-                $reportResult = "FAILED: Script execution error"
+
+            # Get-VIEvent no soporta entidades de tipo Datastore ("Events can be retrieved only
+            # for inventory objects"), asi que confirmamos el disparo mirando directamente el
+            # estado de la alarma en el propio Datastore.
+            $dsView = Get-View $targetDatastore.Id -Property TriggeredAlarmState -Server $serverContext
+            $triggeredState = $dsView.TriggeredAlarmState | Where-Object { $_.Alarm.Value -eq $moref.Value }
+            if ($triggeredState -and $triggeredState.OverallStatus -eq "red") {
+                $reportResult = "SUCCESS (Falso positivo ejecutado)"
             } else {
-                # Fallback Visual
-                $dsView = Get-View $targetDatastore.Id -Property TriggeredAlarmState -Server $serverContext
-                $triggeredState = $dsView.TriggeredAlarmState | Where-Object { $_.Alarm.Value -eq $moref.Value }
-                if ($triggeredState -and $triggeredState.OverallStatus -eq "red") {
-                    $reportResult = "SUCCESS (Falso positivo ejecutado)"
-                } else {
-                    $reportResult = "WARNING: Alarm created but trigger failed"
-                }
+                $reportResult = "WARNING: Alarm created but trigger failed"
             }
 
             # G. Limpieza
