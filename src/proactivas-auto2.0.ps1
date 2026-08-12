@@ -108,44 +108,10 @@ function AnalizarSize {
         'large'   = 4; 'x-large' = 5
     }
 
-    $sizingByVersion = @{ 
-        '9' = @{    #igual que version 8
-            requisitos = @{
-                'tiny'    = @{ Cores = 2;  MemoriaGB = 14; VMsMax = 100 }
-                'small'   = @{ Cores = 4;  MemoriaGB = 21; VMsMax = 1000 }
-                'medium'  = @{ Cores = 8;  MemoriaGB = 30; VMsMax = 4000 }
-                'large'   = @{ Cores = 16; MemoriaGB = 39; VMsMax = 10000 }
-                'x-large' = @{ Cores = 24; MemoriaGB = 58; VMsMax = 35000 }
-            }
-        }
-        '8' = @{ 
-            requisitos = @{
-                'tiny'    = @{ Cores = 2;  MemoriaGB = 14; VMsMax = 100 }
-                'small'   = @{ Cores = 4;  MemoriaGB = 21; VMsMax = 1000 }
-                'medium'  = @{ Cores = 8;  MemoriaGB = 30; VMsMax = 4000 }
-                'large'   = @{ Cores = 16; MemoriaGB = 39; VMsMax = 10000 }
-                'x-large' = @{ Cores = 24; MemoriaGB = 58; VMsMax = 35000 }
-            }
-        }
-        '7' = @{
-            requisitos = @{
-                'tiny'    = @{ Cores = 2;  MemoriaGB = 12; VMsMax = 100 }
-                'small'   = @{ Cores = 4;  MemoriaGB = 19; VMsMax = 1000 }
-                'medium'  = @{ Cores = 8;  MemoriaGB = 28; VMsMax = 4000 }
-                'large'   = @{ Cores = 16; MemoriaGB = 37; VMsMax = 10000 }
-                'x-large' = @{ Cores = 24; MemoriaGB = 56; VMsMax = 35000 }
-            }
-        }
-        '6' = @{ #6.7 = 6.5
-            requisitos = @{
-                'tiny'    = @{ Cores = 2;  MemoriaGB = 10; VMsMax = 100 }
-                'small'   = @{ Cores = 4;  MemoriaGB = 16; VMsMax = 1000 }
-                'medium'  = @{ Cores = 8;  MemoriaGB = 24; VMsMax = 4000 }
-                'large'   = @{ Cores = 16; MemoriaGB = 32; VMsMax = 10000 }
-                'x-large' = @{ Cores = 24; MemoriaGB = 48; VMsMax = 35000 }
-            }
-        }
-    }
+    # Requisitos de sizing por version de vCenter (varian: mas RAM en versiones nuevas para el
+    # mismo talle). Misma fuente que usa la recoleccion (Paso 1) para clasificar "Sizing actual".
+    $rutaSizingRef = Join-Path -Path $baseDir -ChildPath "src\devops-powershell\automatizaciones\lib\data\vcenter-sizing.json"
+    $sizingByVersion = Get-Content -Path $rutaSizingRef -Raw | ConvertFrom-Json -AsHashtable
 
     $mapaDeEstadosVM = @{}; $datosVCenter = @(); $datosSizing = @()
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
@@ -190,20 +156,20 @@ function AnalizarSize {
         $majorVersion = ($vcenter.Version -split '\.')[0]
         
         if ($sizingByVersion.ContainsKey($majorVersion)) {
-            $requisitos = $sizingByVersion[$majorVersion].requisitos
+            $requisitos = $sizingByVersion[$majorVersion]
         }
 
         $sizingActual = ""; if (-not [string]::IsNullOrEmpty($vcenter."Sizing actual")) { $sizingActual = $vcenter."Sizing actual".ToLower().Trim() }
 
         if ($requisitos.ContainsKey($sizingActual)) {
             $req = $requisitos[$sizingActual]
-            
+
             $coresActuales = 0; $memoriaActual = 0.0; $vmsActuales = 0
             [int]::TryParse($vcenter.'vCPU', [ref]$coresActuales)
             [double]::TryParse(($vcenter.'Memory GB'.ToString()).Replace(',','.'), [ref]$memoriaActual)
             [int]::TryParse($vcenter.'Cantidad de VMs', [ref]$vmsActuales)
 
-            if (($coresActuales -lt $req.Cores) -or ($memoriaActual -lt $req.MemoriaGB) -or ($vmsActuales -gt $req.VMsMax)) {
+            if (($coresActuales -lt $req.vcpus) -or ($memoriaActual -lt $req.ramGB) -or ($vmsActuales -gt $req.vmsMax)) {
                 $informeFinal += $vcenter
             }
         }

@@ -1,7 +1,5 @@
 using module ".\lib\proactivas.psm1"
 
-$credenciales = "cHJvYWN0aXZhOlBhc3N3b3JkMTIzJA=="
-
 function Get-DatosProactivas($vcenters) {
     Start-DatosProactivas($vcenters)
 
@@ -55,7 +53,7 @@ function Start-DatosProactivas($vcenters){
 
         Write-Host "`tBatch collection finished. Processing reports..."
         $proactiva.processAlarmCheck($hosts, $vcenter)
-        $proactiva.processVcenterSizing($allVms, $hosts) 
+        $proactiva.processVcenterSizing($allVms, $hosts, $vcenter)
         $proactiva.processBackupActivity()
         $proactiva.processPerformanceHealth($clusters)
         $proactiva.processCertificates()
@@ -75,7 +73,7 @@ function Start-DatosProactivas($vcenters){
     $file = [PSCustomObject] @{
         Result="OK"; Name="Proactiva"; Version = $global:APP_VERSION; DateTime= (Get-Date -Format "yyyy-MM-dd HH:mm");
         LocalHost= [system.environment]::MachineName; User = whoami; Endpoint=$vcenters.host; Component="vcenter";
-        Report = $proactiva.getReport(); IdAutomatizacion=$credenciales;
+        Report = $proactiva.getReport();
     }
 
     # --- [BLOQUE CORREGIDO] ---

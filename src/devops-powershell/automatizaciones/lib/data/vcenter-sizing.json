@@ -1,39 +1,30 @@
 {
-    "vsphere": [
-      {
-        "ToString": "Tiny",
-        "vcpus": 2,
-        "ram": 10,
-        "esxis": 10,
-        "vms": 100
-      },
-      {
-        "ToString": "Small",
-        "vcpus": 4,
-        "ram": 16,
-        "esxis": 100,
-        "vms": 1000
-      },
-      {
-        "ToString": "Medium",
-        "vcpus": 8,
-        "ram": 24,
-        "esxis": 400,
-        "vms": 4000
-      },
-      {
-        "ToString": "Large",
-        "vcpus": 16,
-        "ram": 32,
-        "esxis": 1000,
-        "vms": 10000
-      },
-      {
-        "ToString": "X-Large",
-        "vcpus": 24,
-        "ram": 48,
-        "esxis": 2000,
-        "vms": 35000
-      }
-    ]
+  "6": {
+    "tiny":    { "label": "Tiny",    "vcpus": 2,  "ramGB": 10, "vmsMax": 100 },
+    "small":   { "label": "Small",   "vcpus": 4,  "ramGB": 16, "vmsMax": 1000 },
+    "medium":  { "label": "Medium",  "vcpus": 8,  "ramGB": 24, "vmsMax": 4000 },
+    "large":   { "label": "Large",   "vcpus": 16, "ramGB": 32, "vmsMax": 10000 },
+    "x-large": { "label": "X-Large", "vcpus": 24, "ramGB": 48, "vmsMax": 35000 }
+  },
+  "7": {
+    "tiny":    { "label": "Tiny",    "vcpus": 2,  "ramGB": 12, "vmsMax": 100 },
+    "small":   { "label": "Small",   "vcpus": 4,  "ramGB": 19, "vmsMax": 1000 },
+    "medium":  { "label": "Medium",  "vcpus": 8,  "ramGB": 28, "vmsMax": 4000 },
+    "large":   { "label": "Large",   "vcpus": 16, "ramGB": 37, "vmsMax": 10000 },
+    "x-large": { "label": "X-Large", "vcpus": 24, "ramGB": 56, "vmsMax": 35000 }
+  },
+  "8": {
+    "tiny":    { "label": "Tiny",    "vcpus": 2,  "ramGB": 14, "vmsMax": 100 },
+    "small":   { "label": "Small",   "vcpus": 4,  "ramGB": 21, "vmsMax": 1000 },
+    "medium":  { "label": "Medium",  "vcpus": 8,  "ramGB": 30, "vmsMax": 4000 },
+    "large":   { "label": "Large",   "vcpus": 16, "ramGB": 39, "vmsMax": 10000 },
+    "x-large": { "label": "X-Large", "vcpus": 24, "ramGB": 58, "vmsMax": 35000 }
+  },
+  "9": {
+    "tiny":    { "label": "Tiny",    "vcpus": 2,  "ramGB": 14, "vmsMax": 100 },
+    "small":   { "label": "Small",   "vcpus": 4,  "ramGB": 21, "vmsMax": 1000 },
+    "medium":  { "label": "Medium",  "vcpus": 8,  "ramGB": 30, "vmsMax": 4000 },
+    "large":   { "label": "Large",   "vcpus": 16, "ramGB": 39, "vmsMax": 10000 },
+    "x-large": { "label": "X-Large", "vcpus": 24, "ramGB": 58, "vmsMax": 35000 }
   }
+}

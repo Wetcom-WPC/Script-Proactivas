@@ -1,7 +1,5 @@
 using module ".\lib\proactivas.psm1"
 
-$credenciales = "cHJvYWN0aXZhOlBhc3N3b3JkMTIzJA=="
-
 <#
 .Synopsis
 Recolección de Drivers de Host
@@ -38,7 +36,6 @@ function Start-DriverCollection($vcenters) {
         Endpoint       = $vcenters.host;
         Component      = "vcenter";
         Report         = $proactiva.getReport();
-        IdAutomatizacion = $credenciales;
     }
 
     # --- [BLOQUE CORREGIDO] ---

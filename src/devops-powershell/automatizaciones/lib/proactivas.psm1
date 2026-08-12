@@ -4,7 +4,7 @@
 class Proactiva {
 
     [PSCustomObject[]] $toolsRefJson = (Get-Content -Path (".\automatizaciones\lib\data\vmtools-ref.json") | ConvertFrom-Json)
-    [PSCustomObject[]] $vCenterSizing = (Get-Content -Path (".\automatizaciones\lib\data\vcenter-sizing.json") | ConvertFrom-Json)
+    [PSCustomObject] $vCenterSizing = (Get-Content -Path (".\automatizaciones\lib\data\vcenter-sizing.json") | ConvertFrom-Json)
     [PSCustomObject[]] $vsanhcl = (Get-Content -Path (".\automatizaciones\lib\data\vsan-hcl.json") | ConvertFrom-Json)
 
     [String[]] $annotations = @("VMware vCenter Server Appliance")
@@ -492,24 +492,24 @@ class Proactiva {
         }
     }
     
-    processVcenterSizing($vms, $hosts) {
+    processVcenterSizing($vms, $hosts, $vcenterConnection) {
         Write-Host "`tProcessing Sizing..." -NoNewline
-        
+
         # --- Extracción robusta del nombre del vCenter ---
         $rawVCenter = $this.currentVCenter
         $vcenterName = if ($rawVCenter.Name) { $rawVCenter.Name } else { $rawVCenter }
-        
+
         if ([string]::IsNullOrEmpty($vcenterName)) {
             Write-Warning " -> Error: No se pudo determinar el nombre del vCenter."
             return
         }
-        
+
         # 1. BÚSQUEDA DE VM (Lógica Robusta)
         $vcenterShortName = ($vcenterName).Split('.')[0]
-        
-        $targetVM = $vms | Where-Object { 
-            $_.Name -eq $vcenterName -or 
-            $_.Name -eq $vcenterShortName 
+
+        $targetVM = $vms | Where-Object {
+            $_.Name -eq $vcenterName -or
+            $_.Name -eq $vcenterShortName
         } | Select-Object -First 1
 
         # Fallback: Intentar por Annotation
@@ -532,25 +532,27 @@ class Proactiva {
             return
         }
 
-        # 2. MATCHING DE SIZING
+        # 2. MATCHING DE SIZING (segun la version del vCenter: los requisitos de RAM
+        # varian por version, ver data/vcenter-sizing.json)
+        $majorVersion = "8" # Fallback razonable si no se puede determinar la version
+        if ($vcenterConnection -and $vcenterConnection.Version) {
+            $majorVersion = ($vcenterConnection.Version -split '\.')[0]
+        }
+
+        $perfilesVersion = $this.vCenterSizing.$majorVersion
+        if (-not $perfilesVersion) {
+            # Version sin perfil definido (ej. muy vieja o muy nueva): usamos el perfil mas reciente disponible
+            $perfilesVersion = $this.vCenterSizing.'8'
+        }
+
         $sizingFound = $false
-        
-        for ($i = $this.vCenterSizing.vsphere.Count - 1; $i -ge 0; $i--) {
-            $ref = $this.vCenterSizing.vsphere[$i]
-            
-            # --- [CORRECCIÓN] Volvemos a la lógica original para el nombre ---
-            # Usamos la propiedad .ToString tal cual estaba en tu código viejo
-            $refName = $ref.ToString
-            
-            # (Fallback de seguridad por si acaso la propiedad no existe, para no dejar vacío)
-            if (-not $refName) { $refName = if ($ref.size) { $ref.size } else { $ref.name } }
+        foreach ($tier in @('x-large', 'large', 'medium', 'small', 'tiny')) {
+            $ref = $perfilesVersion.$tier
+            if (-not $ref) { continue }
 
-            $refCpu = $ref.vcpus
-            $refRam = $ref.ram
+            # Comparación (Mayor o Igual): el perfil mas alto que la VM cumple
+            if (($targetVM.NumCpu -ge $ref.vcpus) -and ($targetVM.MemoryGB -ge $ref.ramGB)) {
 
-            # Comparación (Mayor o Igual)
-            if (($targetVM.NumCpu -ge $refCpu) -and ($targetVM.MemoryGB -ge $refRam)) {
-                
                 $this.sizingReport += [PSCustomObject]@{
                     vCenter             = $vcenterName
                     VM                  = $targetVM.Name
@@ -559,11 +561,11 @@ class Proactiva {
                     "Memory GB"         = [math]::Round($targetVM.MemoryGB, 0)
                     "Cantidad de VMs"   = $vms.Count
                     "Cantidad de Hosts" = $hosts.Count
-                    "Sizing actual"     = $refName
+                    "Sizing actual"     = $ref.label
                 }
-                
+
                 $sizingFound = $true
-                break # Encontrado el perfil más alto que cumple, salimos.
+                break
             }
         }
 
@@ -580,7 +582,7 @@ class Proactiva {
                 "Sizing actual"     = "Custom / Undefined"
             }
         }
-        
+
         Write-Host " -> OK." -ForegroundColor Green
     }
 
