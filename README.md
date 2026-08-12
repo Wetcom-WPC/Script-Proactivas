@@ -14,11 +14,11 @@ Este documento explica en detalle cómo correrlo, qué hace cada pieza, y qué a
 4. Si entre lo recolectado está el reporte "Proactiva", se abre una tercera ventana que te pide el **nombre del cliente**, el **mes**, y qué grupo de tareas correr (mensuales / trimestrales / semestrales). Al terminar, quedan generados el Anexo Técnico y la Checklist.
 5. Al cerrar, revisá la carpeta `resultados\<fecha de hoy>\` — ahí está todo lo de esa corrida (ver sección 4).
 
-No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, generación de Excel) en la carpeta `runtime\`. Si en una PC puntual algo no carga bien, corré **`Preparar-Equipo.bat`** — diagnostica los motivos más comunes (Visual C++ Redistributable faltante, proveedor NuGet, instalaciones de PowerCLI que compiten con la incluida) y corrige solo lo que es seguro corregir automáticamente; el resto te lo indica con el mensaje de error real, en vez de la consola en silencio de siempre.
+No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, generación de Excel) en la carpeta `runtime\`. Si en una PC puntual algo no carga bien, corré **`extra\Preparar-Equipo.bat`** — diagnostica los motivos más comunes (Visual C++ Redistributable faltante, proveedor NuGet, instalaciones de PowerCLI que compiten con la incluida) y corrige solo lo que es seguro corregir automáticamente; el resto te lo indica con el mensaje de error real, en vez de la consola en silencio de siempre.
 
 ### Correr un solo paso manualmente
 
-Si necesitás repetir un paso puntual (ej. reprocesar el Excel sin volver a conectarte al vCenter, o regenerar el Anexo porque te equivocaste al tipear el nombre del cliente), no hace falta correr todo `lanzador.bat` de nuevo. Hay un `.bat` por paso, también en la raíz:
+Si necesitás repetir un paso puntual (ej. reprocesar el Excel sin volver a conectarte al vCenter, o regenerar el Anexo porque te equivocaste al tipear el nombre del cliente), no hace falta correr todo `lanzador.bat` de nuevo. En `extra\ejecucion-manual\` hay un `.bat` por paso:
 
 - **`1-Recoleccion-de-Datos.bat`** — corre solo el Paso 1. Crea su propia carpeta de resultados (con numeración `(1)`, `(2)`... si ya corriste algo hoy).
 - **`2-Conversion-a-Excel.bat`** — corre solo el Paso 2. Busca solo, en la carpeta de resultados más reciente, el/los JSON pendientes (según `resultado.txt`).
@@ -85,10 +85,12 @@ Si volvés a correr el paso 3 con el mismo cliente y mes (ej. porque corregiste 
 ```
 script-proactivas/
 ├── lanzador.bat          ← corre los 3 pasos seguidos (uso normal)
-├── 1-Recoleccion-de-Datos.bat  ← corren un paso individual a mano
-├── 2-Conversion-a-Excel.bat      (ver sección 1)
-├── 3-Generar-Anexo.bat
-├── Preparar-Equipo.bat    ← diagnostica requisitos de PowerCLI en esta PC
+├── extra/
+│   ├── Preparar-Equipo.bat      ← diagnostica requisitos de PowerCLI en esta PC
+│   └── ejecucion-manual/
+│       ├── 1-Recoleccion-de-Datos.bat  ← corren un paso individual a mano
+│       ├── 2-Conversion-a-Excel.bat      (ver sección 1)
+│       └── 3-Generar-Anexo.bat
 ├── resultado.txt          ← archivo de trabajo temporal (se borra solo, ver sección 5)
 ├── resultados/             ← acá quedan todos los entregables, organizados por fecha
 ├── runtime/                ← PowerShell portátil + módulos (VMware PowerCLI, ImportExcel).
