@@ -43,6 +43,11 @@ $directorioAnexo = Join-Path -Path $directorioDia -ChildPath "anexo"
 if (-not (Test-Path $directorioAnexo)) { New-Item -ItemType Directory -Path $directorioAnexo -Force | Out-Null }
 
 $archivoSalida = Join-Path -Path $directorioAnexo -ChildPath "Anexo Tecnico - ${nombreCliente} - ${mes}.xlsx"
+
+# Si ya existe un Anexo para este mismo cliente/mes (ej. reprocesando en la misma carpeta),
+# lo borramos antes de generar uno nuevo. Sin esto, Export-Excel reabre el archivo viejo y
+# va agregando/pisando hojas sueltas en vez de partir de un Anexo limpio.
+if (Test-Path $archivoSalida) { Remove-Item $archivoSalida -Force }
 $rutaSalidaChecklist = Join-Path -Path $directorioAnexo -ChildPath "Checklist Proactiva - ${nombreCliente} - ${mes}.xlsx"
 
 $datosSalida = @()
