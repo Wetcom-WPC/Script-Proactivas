@@ -14,7 +14,7 @@ Este documento explica en detalle cómo correrlo, qué hace cada pieza, y qué a
 4. Si entre lo recolectado está el reporte "Proactiva", se abre una tercera ventana que te pide el **nombre del cliente**, el **mes**, y qué grupo de tareas correr (mensuales / trimestrales / semestrales). Al terminar, quedan generados el Anexo Técnico y la Checklist.
 5. Al cerrar, revisá la carpeta `resultados\<fecha de hoy>\` — ahí está todo lo de esa corrida (ver sección 4).
 
-No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, generación de Excel) en la carpeta `runtime\`.
+No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, generación de Excel) en la carpeta `runtime\`. Si en una PC puntual algo no carga bien, corré **`Preparar-Equipo.bat`** — diagnostica los motivos más comunes (Visual C++ Redistributable faltante, proveedor NuGet, instalaciones de PowerCLI que compiten con la incluida) y corrige solo lo que es seguro corregir automáticamente; el resto te lo indica con el mensaje de error real, en vez de la consola en silencio de siempre.
 
 ### Correr un solo paso manualmente
 
@@ -88,6 +88,7 @@ script-proactivas/
 ├── 1-Recoleccion-de-Datos.bat  ← corren un paso individual a mano
 ├── 2-Conversion-a-Excel.bat      (ver sección 1)
 ├── 3-Generar-Anexo.bat
+├── Preparar-Equipo.bat    ← diagnostica requisitos de PowerCLI en esta PC
 ├── resultado.txt          ← archivo de trabajo temporal (se borra solo, ver sección 5)
 ├── resultados/             ← acá quedan todos los entregables, organizados por fecha
 ├── runtime/                ← PowerShell portátil + módulos (VMware PowerCLI, ImportExcel).

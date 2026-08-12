@@ -31,7 +31,6 @@ Import-Module ..\..\runtime\Modules\VMware.VimAutomation.Common
 Import-Module ..\..\runtime\Modules\VMware.VimAutomation.Core
 Import-Module ..\..\runtime\Modules\VMware.VimAutomation.Vds
 Import-Module ..\..\runtime\Modules\VMware.VimAutomation.Sdk
-Import-Module ..\..\runtime\Modules\VMware.Sdk.vSphere
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -confirm:$false
 Set-PowerCLIConfiguration -InvalidCertificateAction:Ignore -confirm:$false
 
