@@ -2,6 +2,12 @@ param(
     [string]$CarpetaResultados = (Get-Date -Format "yyyy-MM-dd")
 )
 
+# Si nos llaman pasando -CarpetaResultados '' (ej. run.bat invocado directo, sin argumento),
+# el default de arriba no aplica porque el parametro SI se paso (vacio). Lo cubrimos aca.
+if ([string]::IsNullOrWhiteSpace($CarpetaResultados)) {
+    $CarpetaResultados = Get-Date -Format "yyyy-MM-dd"
+}
+
 $directorioSrc = Split-Path -Path $PSScriptRoot -Parent
 $directorioRaiz = Split-Path -Path $directorioSrc -Parent
 

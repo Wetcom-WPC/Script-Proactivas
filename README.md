@@ -16,6 +16,16 @@ Este documento explica en detalle cómo correrlo, qué hace cada pieza, y qué a
 
 No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, generación de Excel) en la carpeta `runtime\`.
 
+### Correr un solo paso manualmente
+
+Si necesitás repetir un paso puntual (ej. reprocesar el Excel sin volver a conectarte al vCenter, o regenerar el Anexo porque te equivocaste al tipear el nombre del cliente), no hace falta correr todo `lanzador.bat` de nuevo. Hay un `.bat` por paso, también en la raíz:
+
+- **`1-Recoleccion-de-Datos.bat`** — corre solo el Paso 1. Crea su propia carpeta de resultados (con numeración `(1)`, `(2)`... si ya corriste algo hoy).
+- **`2-Conversion-a-Excel.bat`** — corre solo el Paso 2. Busca solo, en la carpeta de resultados más reciente, el/los JSON pendientes (según `resultado.txt`).
+- **`3-Generar-Anexo.bat`** — corre solo el Paso 3. Busca solo el Excel "Proactiva" más reciente y te pide cliente/mes.
+
+Cada uno funciona sin argumentos ni configuración — doble clic y listo.
+
 ---
 
 ## 2. El flujo completo, paso a paso
@@ -74,7 +84,10 @@ Si volvés a correr el paso 3 con el mismo cliente y mes (ej. porque corregiste 
 
 ```
 script-proactivas/
-├── lanzador.bat          ← lo único que necesitás tocar para correr todo
+├── lanzador.bat          ← corre los 3 pasos seguidos (uso normal)
+├── 1-Recoleccion-de-Datos.bat  ← corren un paso individual a mano
+├── 2-Conversion-a-Excel.bat      (ver sección 1)
+├── 3-Generar-Anexo.bat
 ├── resultado.txt          ← archivo de trabajo temporal (se borra solo, ver sección 5)
 ├── resultados/             ← acá quedan todos los entregables, organizados por fecha
 ├── runtime/                ← PowerShell portátil + módulos (VMware PowerCLI, ImportExcel).
