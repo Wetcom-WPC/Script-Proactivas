@@ -210,8 +210,12 @@ function Particiones {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "Partitions"
-        
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "Partitions" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
+
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['Disk'] -and $fila.PSObject.Properties['Free %']) {
                 $valorNormalizado = ([string]$fila."Free %").Replace(',', '.')
