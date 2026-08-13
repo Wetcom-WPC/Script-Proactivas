@@ -116,11 +116,17 @@ function AnalizarSize {
     $mapaDeEstadosVM = @{}; $datosVCenter = @(); $datosSizing = @()
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivo = $_.FullName
-        (Import-Excel -Path $archivo -WorksheetName "VM") | ForEach-Object {
-            if (-not $mapaDeEstadosVM.ContainsKey($_.VM)) { $mapaDeEstadosVM.Add($_.VM, $_.State) }
-        }
-        $datosVCenter += Import-Excel -Path $archivo -WorksheetName "vCenter"
-        $datosSizing += Import-Excel -Path $archivo -WorksheetName "Sizing"
+        try {
+            (Import-Excel -Path $archivo -WorksheetName "VM" -ErrorAction Stop) | ForEach-Object {
+                if (-not $mapaDeEstadosVM.ContainsKey($_.VM)) { $mapaDeEstadosVM.Add($_.VM, $_.State) }
+            }
+        } catch {}
+        try {
+            $datosVCenter += Import-Excel -Path $archivo -WorksheetName "vCenter" -ErrorAction Stop
+        } catch {}
+        try {
+            $datosSizing += Import-Excel -Path $archivo -WorksheetName "Sizing" -ErrorAction Stop
+        } catch {}
     }
 
     $datosCombinados = @()
@@ -262,7 +268,11 @@ function SyslogCheck {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
         
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['SyslogGlobalLogDir'] -and $fila.PSObject.Properties['SyslogGlobalLogHost']) {
@@ -314,7 +324,11 @@ function Multipath {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "Datastores"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "Datastores" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
     
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['Datastore'] -and $fila.PSObject.Properties['Policy'] -and $fila.PSObject.Properties['Hostname']) {
@@ -388,7 +402,11 @@ function ConsVer {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
         
         $gruposCluster = @{}
 
@@ -455,7 +473,11 @@ function ConsRec {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
         $gruposCluster = @{}
 
         foreach ($fila in $vPartition) {
@@ -534,7 +556,11 @@ function PlacaRed {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "VM"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "VM" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
 
         foreach ($fila in $vPartition) {
             # Verificar si la fila y las propiedades necesarias existen
@@ -619,7 +645,11 @@ function TSMCheck {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
     
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['ESXIShellTimeOut'] -and $fila.PSObject.Properties['ESXIShellinteractiveTimeOut']) {
@@ -681,7 +711,11 @@ function pManagement {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
 
         foreach ($fila in $vPartition) {
             if ($null -ne $fila -and $fila.PSObject.Properties['PowerManagement']) {
@@ -725,7 +759,9 @@ function vmtools {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vmsConProblemas += Import-Excel -Path $archivoEntrada -WorksheetName "VM"
+        try {
+            $vmsConProblemas += Import-Excel -Path $archivoEntrada -WorksheetName "VM" -ErrorAction Stop
+        } catch {}
     }
 
     $vmsConProblemas = $vmsConProblemas | Where-Object {
@@ -806,7 +842,11 @@ function isos {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "VM"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "VM" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
     
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['IsoConnected']) {
@@ -851,7 +891,11 @@ function placasDeRed {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "vNetwork"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "vNetwork" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
     
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['Status'] -and $fila.PSObject.Properties['Connected'] -and $fila.PSObject.Properties['StartsConnected']) {
@@ -900,10 +944,14 @@ function snapshotsCheck {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "Snapshot" | Where-Object {
-            $_.VM -notmatch "(_replica|_rep|_cont)"
-        } | Where-Object {
-            $_.Snapshot -notmatch "Restore Point"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "Snapshot" -ErrorAction Stop | Where-Object {
+                $_.VM -notmatch "(_replica|_rep|_cont)"
+            } | Where-Object {
+                $_.Snapshot -notmatch "Restore Point"
+            }
+        } catch {
+            $vPartition = @()
         }
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['Fecha'] -and $fila.PSObject.Properties['SizeMB']) {
@@ -987,7 +1035,11 @@ function endOfSupport {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
     
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['ESXiVersion']) {
@@ -1055,7 +1107,11 @@ function compatComponentes {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
     
         foreach ($fila in $vPartition) {
             if ($fila.PSObject.Properties['Supported']) {
@@ -1103,7 +1159,11 @@ function ntpCheck {
 
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
         $gruposCluster = @{}
 
         foreach ($fila in $vPartition) {
@@ -1224,7 +1284,11 @@ function DNSConfig { #modificar dropdown de checklist
     $datosSalida = @()
     Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
         $archivoEntrada = $_.FullName
-        $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi"
+        try {
+            $vPartition = Import-Excel -Path $archivoEntrada -WorksheetName "ESXi" -ErrorAction Stop
+        } catch {
+            $vPartition = @()
+        }
         $gruposCluster = @{}
 
         foreach ($fila in $vPartition) {
@@ -1299,9 +1363,12 @@ function Licencia {
     $fechaHoy = Get-Date
     $fechaLimiteUnAnio = $fechaHoy.AddYears(1)
 
-    $todasLasLicencias = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "vLicense"
-    }
+    $todasLasLicencias = @()
+    try {
+        $todasLasLicencias = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "vLicense" -ErrorAction Stop
+        }
+    } catch { $todasLasLicencias = @() }
 
     # 1. Analizamos cada licencia para vencimiento, uso y evaluación
     foreach ($licencia in $todasLasLicencias) {
@@ -1440,9 +1507,12 @@ function vss {
 
     $informeFinal = @()
 
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "Standard Switch"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.Cluster) }
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "Standard Switch" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_.Cluster) }
+    } catch { $todosLosDatos = @() }
 
     $gruposCluster = $todosLosDatos | Group-Object -Property @{ Expression = { $_.vCenter + '|' + $_.Cluster } }
 
@@ -1512,9 +1582,12 @@ function vss {
 
 function vCenterRoot {
     # 1. Importar datos de la hoja "vCenter"
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "vCenter"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_. "vCenter Server") }
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "vCenter" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_. "vCenter Server") }
+    } catch { $todosLosDatos = @() }
 
     # --- CONDICIÓN GLOBAL: SIN ACCESO (Hoja Vacía) ---
     if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
@@ -1623,9 +1696,12 @@ function vCenterRoot {
 #Si el vencimiento es menor a 6 meses, deberá generarse un ticket de soporte, tipo problema, prioridad planificado para dar seguimiento al caso.
 function vCenterCert {
     # 1. Importar datos de la hoja "Certficate" (Nombre exacto solicitado)
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "Certficate"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "Certficate" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    } catch { $todosLosDatos = @() }
 
     # Variables de control
     $informeFinal = @()
@@ -1735,9 +1811,12 @@ function vCenterCert {
 
 function esxiCert {
     # 1. Importar datos de la hoja "ESXi"
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "ESXi"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "ESXi" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    } catch { $todosLosDatos = @() }
 
     if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
         return [PSCustomObject]@{
@@ -1842,9 +1921,12 @@ function esxiCert {
 
 function performanceHealthCheck {
     # 1. Importar datos de la hoja "PerformanceHealth"
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "PerformanceHealth"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "PerformanceHealth" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    } catch { $todosLosDatos = @() }
 
     # --- CONDICIÓN GLOBAL: SIN DATOS ---
     if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
@@ -2064,9 +2146,12 @@ function alarmCheck {
 
 function backupCheck {
     # 1. Importar datos
-    $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
-        Import-Excel -Path $_.FullName -WorksheetName "BackupActivity"
-    } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    $todosLosDatos = @()
+    try {
+        $todosLosDatos = Get-ChildItem -Path $excelMasReciente -Filter *.xlsx | ForEach-Object {
+            Import-Excel -Path $_.FullName -WorksheetName "BackupActivity" -ErrorAction Stop
+        } | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) }
+    } catch { $todosLosDatos = @() }
 
     # Condición Global: Sin Datos
     if (-not $todosLosDatos -or $todosLosDatos.Count -eq 0) {
