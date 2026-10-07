@@ -817,13 +817,48 @@ class Proactiva {
         } catch {}
 
         # 2. Definir las listas de alarmas
+        # Los nombres se buscan exactos o por prefijo (nombre base + espacio):
+        # desde vCenter 8.0 U3g VMware le pega a algunas alarmas la referencia
+        # a la KB 385107 ("... KB 385107" o la URL completa).
+        # Mantener alineado con el repo configuracion-de-alarmas.
         $standardAlarms = @(
-            "Host battery status", "Host connection failure", "Host hardware fan status", 
-            "Host hardware power status", "Host hardware system board status", "Host hardware temperature status", 
-            "Host hardware voltage", "Network connectivity lost", "Network uplink redundancy degraded", 
-            "Network uplink redundancy lost", "Unmanaged workload detected on SIOC-enabled datastore", 
-            "Cannot connect to storage", "Certificate Status", "ESXi Host Certificate Status", 
+            "Host battery status", "Host connection failure", "Host hardware fan status",
+            "Host hardware power status", "Host hardware system board status", "Host hardware temperature status",
+            "Host hardware voltage", "Network connectivity lost", "Network uplink redundancy degraded",
+            "Network uplink redundancy lost", "Unmanaged workload detected on SIOC-enabled datastore",
+            "Cannot connect to storage",
             "Insufficient vSphere HA failover resources", "vSphere HA failover in progress"
+        )
+
+        # Las alarmas de certificados cambiaron dentro de 8.0 Update 3, así que
+        # cada grupo tiene la variante vieja y la nueva. Se audita la que exista
+        # en el vCenter y solo es "Not Found" si no existe ninguna:
+        #   - 'Certificate Status' (hasta 8.0 U3f) -> reemplazada en 8.0 U3g por
+        #     10 alarmas, una por almacén VECS (KB 412316).
+        #   - 'ESXi Host Certificate Status' (hasta 8.0 U3g) -> renombrada en
+        #     8.0 U3h (KB 440340).
+        $certificateAlarms = @(
+            @{
+                Vieja = @("Certificate Status")
+                Nueva = @(
+                    "Certificate(s) in VECS TRUSTED_ROOTS store has expired",
+                    "Certificate(s) in VECS TRUSTED_ROOTS store is about to expire",
+                    "Data-encipherment certificate in VECS has expired",
+                    "Data-encipherment certificate in VECS is about to expire",
+                    "MACHINE_SSL_CERT certificate in VECS has expired",
+                    "MACHINE_SSL_CERT certificate in VECS is about to expire",
+                    "SMS certificate in VECS has expired",
+                    "SMS certificate in VECS is about to expire",
+                    "Solution user certificate(s) in VECS has expired",
+                    "Solution user certificate(s) in VECS is about to expire"
+                )
+                SinVariantes = "Certificate Status (ni sus reemplazos VECS de 8.0 U3g+)"
+            },
+            @{
+                Vieja = @("ESXi Host Certificate Status")
+                Nueva = @("ESXi Host Certificate is about to expire")
+                SinVariantes = "ESXi Host Certificate Status (ni su reemplazo de 8.0 U3h+)"
+            }
         )
 
         $vsanAlarms = @(
@@ -837,23 +872,54 @@ class Proactiva {
             "vSAN performance service alarm 'Verbose mode'", "vSAN performance service alarm 'Network diagnostic mode'"
         )
 
+        # Traemos todas las definiciones una sola vez y buscamos en memoria
+        $todasLasAlarmas = @(Get-AlarmDefinition -Server $serverContext -ErrorAction SilentlyContinue)
+        $buscarAlarma = {
+            param($todas, $nombre)
+            $exacta = @($todas | Where-Object { $_.Name -eq $nombre })
+            if ($exacta.Count -gt 0) { return $exacta[0] }
+            $prefijo = "$nombre "
+            $todas | Where-Object { $_.Name.StartsWith($prefijo, [StringComparison]::OrdinalIgnoreCase) } |
+                Select-Object -First 1
+        }
+
         # 3. Combinar listas según corresponda
-        $alarmsToCheck = $standardAlarms
+        $alarmsToCheck = @($standardAlarms)
+        $sinVariantes = @()
+        foreach ($grupo in $certificateAlarms) {
+            $hayVieja = @($grupo.Vieja | Where-Object { & $buscarAlarma $todasLasAlarmas $_ }).Count -gt 0
+            $hayNueva = @($grupo.Nueva | Where-Object { & $buscarAlarma $todasLasAlarmas $_ }).Count -gt 0
+
+            if ($hayVieja) { $alarmsToCheck += $grupo.Vieja }
+            if ($hayNueva) { $alarmsToCheck += $grupo.Nueva }
+            if (-not $hayVieja -and -not $hayNueva) { $sinVariantes += $grupo.SinVariantes }
+        }
         if ($isVsanEnabled) {
             $alarmsToCheck += $vsanAlarms
+        }
+
+        # Grupo de certificados sin ninguna de sus variantes: faltante real
+        foreach ($etiqueta in $sinVariantes) {
+            $this.alarmCheckReport += [PSCustomObject]@{
+                vCenter      = $vcenterName
+                Host         = "-"
+                "Alarm Name" = $etiqueta
+                "Script Path"= "N/A"
+                Result       = "Not Found"
+                Timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            }
         }
 
         # 4. Iterar y Verificar
         foreach ($alarmName in $alarmsToCheck) {
             $status = "Not Found"
             $path = "N/A"
-            
-            # Buscamos la definición exacta
-            $def = Get-AlarmDefinition -Name $alarmName -Server $serverContext -ErrorAction SilentlyContinue | Select-Object -First 1
-            
+
+            $def = & $buscarAlarma $todasLasAlarmas $alarmName
+
             if ($def) {
                 $status = "No Script Configured"
-                
+
                 # Inspeccionamos las acciones
                 try {
                     $info = $def.ExtensionData.Info
@@ -867,7 +933,7 @@ class Proactiva {
                                 } else {
                                     $status = "Script Action Empty"
                                 }
-                                break 
+                                break
                             }
                         }
                     }
