@@ -264,7 +264,6 @@ function Test-Licenses($Context) {
     $foundOverused = $false
     $foundDuplicated = $false
 
-    $evaluationCount = 0
     $today = Get-Date
     $oneYearFromNow = $today.AddYears(1)
 
@@ -273,16 +272,25 @@ function Test-Licenses($Context) {
     # 1. Expiration, usage and evaluation per license
     foreach ($license in $licenses) {
         $expiration = $license.ExpirationDate
+        $used = 0
+        [void][int]::TryParse([string]$license.Used, [ref]$used)
+        $total = 0
+        $hasLimit = [int]::TryParse([string]$license.Total, [ref]$total)   # "Unlimited" has no limit
         $isFinding = $false
 
-        if ($license.Used -gt $license.Total) {
+        if ($hasLimit -and $used -gt $total) {
             $foundOverused = $true
             $isFinding = $true
         }
-        if ($expiration -eq "Evaluation" -or $expiration -eq "Never") {
-            $foundEvaluation = $true
-            $evaluationCount++
-            $isFinding = $true
+
+        if ($expiration -eq "Never") {
+            # Perpetual license: never expires
+        } elseif ($expiration -eq "Evaluation") {
+            # Every vCenter lists a "Product Evaluation" entry; it only matters when something uses it
+            if ($used -gt 0) {
+                $foundEvaluation = $true
+                $isFinding = $true
+            }
         } else {
             try {
                 $expirationDate = [datetimeoffset]::Parse($expiration).DateTime
@@ -307,26 +315,25 @@ function Test-Licenses($Context) {
         $findings += $duplicated
     }
 
+    # Only values from the checklist dropdown: Resultado Esperado / Vencimiento < 1 Año /
+    # Vencido / Excepción. Evaluation mode expires within 60 days, so it counts as "< 1 Año".
     $result = "Resultado Esperado"
-    $detail = $null
+    $detail = "No se encontraron licencias vencidas, por vencer ni en modo de evaluación."
     if ($foundExpired) {
         $result = "Vencido"
         $detail = "Se encontraron licencias vencidas. Ver anexo."
+    } elseif ($foundEvaluation) {
+        $result = "Vencimiento < 1 Año"
+        $detail = "Se encontraron licencias en modo de evaluación en uso (vencen a los 60 días). Ver anexo."
     } elseif ($foundExpiringSoon) {
         $result = "Vencimiento < 1 Año"
         $detail = "Se encontraron licencias con vencimiento menor a un año. Ver anexo."
     } elseif ($foundOverused) {
-        $result = "No recomendado"
+        $result = "Excepción"
         $detail = "Se encontraron licencias cuyo uso excede el límite total. Ver anexo."
     } elseif ($foundDuplicated) {
-        $result = "No recomendado"
+        $result = "Excepción"
         $detail = "Se encontraron License Keys duplicadas. Ver anexo."
-    } elseif ($foundEvaluation -and $evaluationCount -eq $licenses.Count) {
-        $result = "En evaluación"
-        $detail = "Todas las licencias del entorno se encuentran en modo de evaluación. Ver anexo."
-    } elseif ($foundEvaluation) {
-        $result = "No recomendado"
-        $detail = "Se encontraron licencias en modo de evaluación junto con otras licencias. Ver anexo."
     }
 
     if ($findings.Count -gt 0) {
@@ -433,7 +440,7 @@ function Test-EsxiCertificates($Context) {
     $hosts = @(Import-RawSheet $Context.RawExcelPath "ESXi" | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) })
 
     if ($hosts.Count -eq 0) {
-        return [PSCustomObject]@{ ID = "VSP-TR-08"; Resultado = "Sin acceso"; Detalle = "No se pudo recolectar información de los Hosts ESXi o la hoja está vacía." }
+        return [PSCustomObject]@{ ID = "VSP-TR-08"; Resultado = "Excepción"; Detalle = "No se pudo recolectar información de los Hosts ESXi o la hoja está vacía." }
     }
 
     $findings = @()
@@ -589,7 +596,7 @@ function Test-PerformanceStatistics($Context) {
     $clusters = @(Import-RawSheet $Context.RawExcelPath "PerformanceHealth" | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) })
 
     if ($clusters.Count -eq 0) {
-        return [PSCustomObject]@{ ID = "VSP-TR-10"; Resultado = "Sin acceso"; Detalle = "No se pudo recolectar información de salud de performance o la hoja está vacía." }
+        return [PSCustomObject]@{ ID = "VSP-TR-10"; Resultado = "Excepción"; Detalle = "No se pudo recolectar información de salud de performance o la hoja está vacía." }
     }
 
     $findings = @()
