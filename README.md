@@ -93,9 +93,9 @@ script-proactivas/
     ├── collection/               ← 1. Recolección
     │   ├── Collection.psm1           conexión a vCenters (llavero) y armado de los JSON
     │   ├── ProactivaCollector.psm1   clase con toda la lógica de recolección
-    │   ├── HardwareCompatibility.ps1 búsquedas en la HCL de VMware
+    │   ├── HardwareCompatibility.ps1 búsquedas en la HCL (Broadcom Compatibility Guide)
     │   ├── Update-ReferenceData.ps1  utilidad manual: actualiza reference-data\ desde internet
-    │   └── reference-data/           JSON de referencia (HCL, releases de ESXi, sizing, Tools)
+    │   └── reference-data/           HCL de servidores (CSV), HCL de I/O, releases de ESXi, sizing, Tools
     ├── conversion/               ← 2. JSON → Excel crudo
     │   └── Conversion.psm1
     ├── report/                   ← 3. Anexo Técnico y Checklist
@@ -144,7 +144,9 @@ Si corrés el proceso más de una vez el mismo día, cada corrida tiene su propi
 
 **TR-04 (Drivers):** lista todas las placas en la hoja "Host Drivers" del anexo y marca "No compatible" si alguna no figura en la HCL para la release de su host. Las versiones de driver/firmware no se pueden validar automáticamente con los datos de referencia, así que si no hay incompatibilidades el Estado queda en blanco para que el técnico lo complete revisando la URL de cada placa.
 
-**Datos de referencia:** TR-02 y TR-04 dependen de los JSON de `src\collection\reference-data\`. Si están desactualizados, hosts soportados aparecen como no soportados (TR-02) o "Sin datos" (TR-04). Para actualizarlos: `.\runtime\pwsh.exe -File .\src\collection\Update-ReferenceData.ps1`.
+**TR-02 (Compatibilidad de servidores):** en cada corrida se descarga el catálogo completo de "Systems / Servers" del [Broadcom Compatibility Guide](https://compatibilityguide.broadcom.com), desde la misma API que usa su web (sin autenticación, unos 6 MB). Si no hay internet o la API cambia, se usa la copia local `src\collection\reference-data\servers-hcl.csv`; la columna `Note` de la hoja ESXi del Excel crudo indica qué fuente se usó. Se compara modelo + familia de CPU + release del host. Si el modelo está en la HCL pero no con la familia de CPU del host, queda como "Sin datos" y el detalle de la checklist lista esos hosts para revisión manual.
+
+**Datos de referencia:** `servers-hcl.csv` (respaldo de TR-02) y los JSON de `src\collection\reference-data\` (HCL de I/O para TR-04, releases de ESXi, VMware Tools, vSAN) se actualizan con `.\runtime\pwsh.exe -File .\src\collection\Update-ReferenceData.ps1`. El CSV también se puede reemplazar por uno exportado a mano desde la web del Broadcom Compatibility Guide ("Export to CSV"): tiene el mismo formato. Con datos viejos, TR-04 muestra placas como "Sin datos".
 
 ---
 

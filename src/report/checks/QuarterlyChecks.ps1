@@ -64,12 +64,20 @@ function Test-EsxiEndOfSupport($Context) {
     return [PSCustomObject]@{ ID = "VSP-TR-01"; Resultado = $result; Detalle = $detail }
 }
 
-# Server hardware support for the host's ESXi release (HCL lookup done during collection)
+# Server hardware support for the host's ESXi release (HCL lookup done during collection).
+# Hosts whose support could not be decided ("Sin datos": model in the HCL but CPU family not
+# matched, or unknown release) are not findings; the detail mentions them for manual review.
 function Test-HardwareCompatibility($Context) {
     $findings = @()
+    $noDataHosts = @()
 
     foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
-        if ($row.PSObject.Properties['Supported'] -and $row.Supported.Trim() -eq "False") {
+        if (-not $row.PSObject.Properties['Supported']) { continue }
+
+        if ($row.Supported.Trim() -eq "Sin datos") {
+            $noDataHosts += $row.Hostname
+        }
+        elseif ($row.Supported.Trim() -eq "False") {
             $findings += [PSCustomObject]@{
                 "vCenter"                   = $row."vCenter"
                 "Hostname"                  = $row."Hostname"
@@ -82,12 +90,14 @@ function Test-HardwareCompatibility($Context) {
         }
     }
 
+    $noDataNote = if ($noDataHosts.Count -gt 0) { " $($noDataHosts.Count) hosts sin datos suficientes para validarlos (revisar manualmente: $($noDataHosts -join ', '))." } else { "" }
+
     if ($findings.Count -gt 0) {
         Export-AnnexSheet -Data $findings -Path $Context.AnnexPath -WorksheetName "Compatibilidad de Componentes"
-        return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) componentes no soportados por la version de ESXi actual" }
+        return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) componentes no soportados por la version de ESXi actual.$noDataNote" }
     }
 
-    return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "Resultado Esperado"; Detalle = "Todos los componentes analizados son compatibles con su versión de ESXi." }
+    return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "Resultado Esperado"; Detalle = "Todos los componentes analizados son compatibles con su versión de ESXi.$noDataNote" }
 }
 
 function Test-NtpConfiguration($Context) {

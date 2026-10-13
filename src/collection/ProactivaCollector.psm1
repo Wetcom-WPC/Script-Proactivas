@@ -78,10 +78,10 @@ class ProactivaCollector {
     }
 
     CollectEsxi($hosts) {
+        $hclData = Get-HclReferenceData -ReferenceDataFolder $this.ReferenceDataFolder
         Write-Host "`tProcesando ESXi..." -NoNewline
 
         $serverContext = $this.currentVCenter
-        $hclData = Get-HclReferenceData -ReferenceDataFolder $this.ReferenceDataFolder
 
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
@@ -92,7 +92,7 @@ class ProactivaCollector {
             catch {
                 $hclResult = [PSCustomObject]@{
                     Model             = "No data available"
-                    Supported         = $false
+                    Supported         = $null
                     SupportedReleases = "No data available"
                     Reference         = "No data available"
                     Note              = "Host cannot be processed"
@@ -195,7 +195,7 @@ class ProactivaCollector {
                 PowerManagement             = $h.ExtensionData.Hardware.CpuPowerManagementInfo.CurrentPolicy
                 SyslogGlobalLogDir          = $syslogLogDir
                 SyslogGlobalLogHost         = $syslogLogHost
-                Supported                   = if ($hclResult.Supported) { "True" } else { "False" }
+                Supported                   = if ($null -eq $hclResult.Supported) { "Sin datos" } elseif ($hclResult.Supported) { "True" } else { "False" }
                 "Supported Releases"        = $hclResult.SupportedReleases -join ","
                 Note                        = $hclResult.Note
                 Reference                   = $hclResult.Reference

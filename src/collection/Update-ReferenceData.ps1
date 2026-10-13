@@ -6,11 +6,11 @@
 # download keeps the previous file.
 
 $dataFolder = Join-Path $PSScriptRoot 'reference-data'
+. (Join-Path $PSScriptRoot 'HardwareCompatibility.ps1')
 
 $downloads = [ordered]@{
     'vmware-iohcl.json' = 'https://www.virten.net/repo/vmware-iohcl.json'   # IO devices (NICs, HBAs) HCL
     'esxiReleases.json' = 'https://www.virten.net/repo/esxiReleases.json'   # ESXi build -> release
-    'vmware-hcl.json'   = 'https://www.virten.net/repo/vmware-hcl.json'     # Server models HCL
     'vsan-hcl.json'     = 'https://partnerweb.vmware.com/service/vsan/all.json'
 }
 
@@ -34,6 +34,24 @@ foreach ($fileName in $downloads.Keys) {
         Remove-Item $temp -ErrorAction SilentlyContinue
         Write-Host " FALLO: $($_.Exception.Message)" -ForegroundColor Red
     }
+}
+
+# Server HCL: fallback copy of the Broadcom Compatibility Guide catalog, in the same format as
+# the guide's "Export to CSV" (so a CSV exported by hand from the website can replace it)
+Write-Host "Actualizando servers-hcl.csv (Broadcom Compatibility Guide)..." -NoNewline
+try {
+    Get-ServerHclOnline | ForEach-Object {
+        [PSCustomObject][ordered]@{
+            'Partner Name'       = $_.manufacturer
+            'Model'              = $_.model
+            'CPU Series'         = $_.cpuSeries
+            'Supported Releases' = $_.releases -join "`n"
+        }
+    } | Export-Csv -Path (Join-Path $dataFolder 'servers-hcl.csv') -NoTypeInformation -Encoding utf8
+    Write-Host " OK" -ForegroundColor Green
+}
+catch {
+    Write-Host " FALLO: $($_.Exception.Message)" -ForegroundColor Red
 }
 
 Write-Host "Actualizando referencia de VMware Tools por build de ESXi..." -NoNewline
