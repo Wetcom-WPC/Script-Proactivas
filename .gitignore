@@ -1,8 +1,5 @@
 # Resultados generados por cada corrida (JSON, Excel, Anexo, logs) - no versionar
 resultados/
 
-# Cola de trabajo entre pasos del pipeline (se regenera en cada corrida)
-resultado.txt
-
 *.log
 *.zip

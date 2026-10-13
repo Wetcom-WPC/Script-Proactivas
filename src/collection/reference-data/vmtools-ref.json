@@ -1,13 +1,229 @@
 [
   {
+    "toolsBuild": "13349",
+    "esxiVersion": "esx/9.1.1",
+    "toolsVersion": "13.1.5",
+    "esxiBuild": "25677323"
+  },
+  {
+    "toolsBuild": "12452",
+    "esxiVersion": "esx/8.0p09",
+    "toolsVersion": "12.5.4",
+    "esxiBuild": "25429389"
+  },
+  {
+    "toolsBuild": "13344",
+    "esxiVersion": "esx/9.1",
+    "toolsVersion": "13.1.0",
+    "esxiBuild": "25370933"
+  },
+  {
+    "toolsBuild": "12452",
+    "esxiVersion": "esx/8.0p08",
+    "toolsVersion": "12.5.4",
+    "esxiBuild": "25205845"
+  },
+  {
+    "toolsBuild": "13322",
+    "esxiVersion": "esx/9.0.2.0",
+    "toolsVersion": "13.0.10",
+    "esxiBuild": "25148076"
+  },
+  {
+    "toolsBuild": "12452",
+    "esxiVersion": "esx/8.0p07",
+    "toolsVersion": "12.5.4",
+    "esxiBuild": "25067014"
+  },
+  {
+    "toolsBuild": "13317",
+    "esxiVersion": "esx/9.0.1.0",
+    "toolsVersion": "13.0.5",
+    "esxiBuild": "24957456"
+  },
+  {
+    "toolsBuild": "12451",
+    "esxiVersion": "esx/8.0p06",
+    "toolsVersion": "12.5.3",
+    "esxiBuild": "24859861"
+  },
+  {
+    "toolsBuild": "13312",
+    "esxiVersion": "esx/9.0",
+    "toolsVersion": "13.0.0",
+    "esxiBuild": "24755229"
+  },
+  {
+    "toolsBuild": "12449",
+    "esxiVersion": "esx/7.0p10",
+    "toolsVersion": "12.5.1",
+    "esxiBuild": "24723872"
+  },
+  {
+    "toolsBuild": "12449",
+    "esxiVersion": "esx/8.0p05",
+    "toolsVersion": "12.5.1",
+    "esxiBuild": "24674464"
+  },
+  {
+    "toolsBuild": "12421",
+    "esxiVersion": "esx/8.0p04",
+    "toolsVersion": "12.4.5",
+    "esxiBuild": "24280767"
+  },
+  {
+    "toolsBuild": "12416",
+    "esxiVersion": "esx/8.0u3",
+    "toolsVersion": "12.4.0",
+    "esxiBuild": "24022510"
+  },
+  {
+    "toolsBuild": "12389",
+    "esxiVersion": "esx/7.0p09",
+    "toolsVersion": "12.3.5",
+    "esxiBuild": "23794027"
+  },
+  {
+    "toolsBuild": "12389",
+    "esxiVersion": "esx/8.0p03",
+    "toolsVersion": "12.3.5",
+    "esxiBuild": "23305546"
+  },
+  {
+    "toolsBuild": "12358",
+    "esxiVersion": "esx/7.0p08",
+    "toolsVersion": "12.2.6",
+    "esxiBuild": "22348816"
+  },
+  {
+    "toolsBuild": "10362",
+    "esxiVersion": "esx/8.0u2",
+    "toolsVersion": "10.3.26",
+    "esxiBuild": "22380479"
+  },
+  {
+    "toolsBuild": "12384",
+    "esxiVersion": "esx/8.0u2",
+    "toolsVersion": "12.3.0",
+    "esxiBuild": "22380479"
+  },
+  {
+    "toolsBuild": "12357",
+    "esxiVersion": "esx/8.0p02",
+    "toolsVersion": "12.2.5",
+    "esxiBuild": "22088125"
+  },
+  {
+    "toolsBuild": "12325",
+    "esxiVersion": "esx/7.0p07",
+    "toolsVersion": "12.1.5",
+    "esxiBuild": "21424296"
+  },
+  {
+    "toolsBuild": "12352",
+    "esxiVersion": "esx/8.0u1",
+    "toolsVersion": "12.2.0",
+    "esxiBuild": "21495797"
+  },
+  {
+    "toolsBuild": "12325",
+    "esxiVersion": "esx/8.0p01",
+    "toolsVersion": "12.1.5",
+    "esxiBuild": "21203435"
+  },
+  {
+    "toolsBuild": "12320",
+    "esxiVersion": "esx/7.0p06",
+    "toolsVersion": "12.1.0",
+    "esxiBuild": "20842708"
+  },
+  {
+    "toolsBuild": "12294",
+    "esxiVersion": "esx/8.0",
+    "toolsVersion": "12.0.6",
+    "esxiBuild": "20513097"
+  },
+  {
+    "toolsBuild": "12294",
+    "esxiVersion": "esx/6.7p08",
+    "toolsVersion": "12.0.6",
+    "esxiBuild": "20497097"
+  },
+  {
+    "toolsBuild": "12294",
+    "esxiVersion": "esx/6.5p09",
+    "toolsVersion": "12.0.6",
+    "esxiBuild": "20502893"
+  },
+  {
+    "toolsBuild": "12288",
+    "esxiVersion": "esx/7.0p05",
+    "toolsVersion": "12.0.0",
+    "esxiBuild": "20036589"
+  },
+  {
+    "toolsBuild": "12288",
+    "esxiVersion": "esx/6.7p07",
+    "toolsVersion": "12.0.0",
+    "esxiBuild": "19898906"
+  },
+  {
+    "toolsBuild": "12288",
+    "esxiVersion": "esx/6.5p08",
+    "toolsVersion": "12.0.0",
+    "esxiBuild": "19588618"
+  },
+  {
+    "toolsBuild": "11365",
+    "esxiVersion": "esx/7.0p04",
+    "toolsVersion": "11.3.5",
+    "esxiBuild": "19482537"
+  },
+  {
+    "toolsBuild": "11365",
+    "esxiVersion": "esx/6.7p06",
+    "toolsVersion": "11.3.5",
+    "esxiBuild": "18828794"
+  },
+  {
+    "toolsBuild": "11360",
+    "esxiVersion": "esx/6.5p07",
+    "toolsVersion": "11.3.0",
+    "esxiBuild": "18678235"
+  },
+  {
+    "toolsBuild": "11360",
+    "esxiVersion": "esx/7.0u3",
+    "toolsVersion": "11.3.0",
+    "esxiBuild": "18644231"
+  },
+  {
+    "toolsBuild": "11334",
+    "esxiVersion": "esx/7.0p03",
+    "toolsVersion": "11.2.6",
+    "esxiBuild": "18426014"
+  },
+  {
     "toolsBuild": "11333",
-    "esxiVersion": "esx/6.5p06",
+    "esxiVersion": "esx/7.0u2",
     "toolsVersion": "11.2.5",
+    "esxiBuild": "17630552"
+  },
+  {
+    "toolsBuild": "11333",
+    "esxiVersion": "esx/6.7p05",
+    "toolsVersion": "11.2.5",
+    "esxiBuild": "17700523"
+  },
+  {
+    "toolsBuild": "11329",
+    "esxiVersion": "esx/6.5p06",
+    "toolsVersion": "11.2.1",
     "esxiBuild": "17477841"
   },
   {
     "toolsBuild": "10359",
-    "esxiVersion": "esx/0.5p06",
+    "esxiVersion": "esx/6.5p06",
     "toolsVersion": "10.3.23",
     "esxiBuild": "17477841"
   },
@@ -16,6 +232,12 @@
     "esxiVersion": "esx/7.0p02",
     "toolsVersion": "11.1.5",
     "esxiBuild": "17325551"
+  },
+  {
+    "toolsBuild": "11297",
+    "esxiVersion": "esx/7.0u1",
+    "toolsVersion": "11.1.1",
+    "esxiBuild": "16850804"
   },
   {
     "toolsBuild": "11297",

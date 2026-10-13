@@ -1,183 +1,164 @@
 # script-proactivas
 
-Automatización del servicio **Visita Proactiva**: recolecta el estado de la infraestructura VMware de un cliente (vCenter, hosts ESXi, VMs, datastores, redes, certificados, licencias, snapshots, backups, etc.), lo compara contra buenas prácticas y genera dos entregables en Excel — un **Anexo Técnico** con el detalle de cada hallazgo y una **Checklist** con el resultado de cada punto — listos para enviar al cliente.
+Automatización del servicio **Visita Proactiva**: recolecta el estado de la infraestructura VMware de un cliente (vCenter, hosts ESXi, VMs, datastores, redes, certificados, licencias, snapshots, backups, etc.), lo compara contra buenas prácticas y genera dos entregables en Excel: un **Anexo Técnico** con el detalle de cada hallazgo y una **Checklist** con el resultado de cada punto, listos para enviar al cliente.
 
-Este documento explica en detalle cómo correrlo, qué hace cada pieza, y qué archivos deberías tener al final de una ejecución. Está pensado para que cualquier persona del equipo, sin haber tocado el proyecto antes, pueda entender el flujo completo.
-
----
-
-## 1. Cómo correrlo (resumen rápido)
-
-1. Doble clic en **`lanzador.bat`** (en la raíz del proyecto).
-2. Se abre una ventana nueva con un menú de consola. Tildá **"Recolección de Datos para Proactiva"** (y opcionalmente "Recolección de Drivers de Host"), presioná `e` para ejecutar, e ingresá el/los vCenter y credenciales cuando se pidan.
-3. Cuando termina la recolección, se abre sola otra ventana que convierte los datos a Excel.
-4. Si entre lo recolectado está el reporte "Proactiva", se abre una tercera ventana que te pide el **nombre del cliente**, el **mes**, y qué grupo de tareas correr (mensuales / trimestrales / semestrales). Al terminar, quedan generados el Anexo Técnico y la Checklist.
-5. Al cerrar, revisá la carpeta `resultados\<fecha de hoy>\` — ahí está todo lo de esa corrida (ver sección 4).
-
-No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, generación de Excel) en la carpeta `runtime\`. Si en una PC puntual algo no carga bien, corré **`extra\Preparar-Equipo.bat`** — diagnostica los motivos más comunes (Visual C++ Redistributable faltante, proveedor NuGet, instalaciones de PowerCLI que compiten con la incluida) y corrige solo lo que es seguro corregir automáticamente; el resto te lo indica con el mensaje de error real, en vez de la consola en silencio de siempre.
-
-### Correr un solo paso manualmente
-
-Si necesitás repetir un paso puntual (ej. reprocesar el Excel sin volver a conectarte al vCenter, o regenerar el Anexo porque te equivocaste al tipear el nombre del cliente), no hace falta correr todo `lanzador.bat` de nuevo. En `extra\ejecucion-manual\` hay un `.bat` por paso:
-
-- **`1-Recoleccion-de-Datos.bat`** — corre solo el Paso 1. Crea su propia carpeta de resultados (con numeración `(1)`, `(2)`... si ya corriste algo hoy).
-- **`2-Conversion-a-Excel.bat`** — corre solo el Paso 2. Busca solo, en la carpeta de resultados más reciente, el/los JSON pendientes (según `resultado.txt`).
-- **`3-Generar-Anexo.bat`** — corre solo el Paso 3. Busca solo el Excel "Proactiva" más reciente y te pide cliente/mes.
-
-Cada uno funciona sin argumentos ni configuración — doble clic y listo.
+Este documento explica cómo correrlo, qué hace cada pieza y qué archivos quedan al final. Está pensado para que cualquier persona del equipo, sin haber tocado el proyecto antes, entienda el flujo completo.
 
 ---
 
-## 2. El flujo completo, paso a paso
+## 1. Cómo correrlo
 
-`lanzador.bat` orquesta 3 pasos, cada uno corriendo como un proceso de PowerShell separado (por eso, más abajo, van a aparecer archivos que sirven solo para que estos pasos se pasen información entre sí).
+1. Doble clic en **`Iniciar-Proactiva.bat`** (raíz del proyecto).
+2. El script pregunta todo al principio:
+   - **Nombre del cliente**
+   - **Mes del reporte** (Enter acepta el mes actual)
+   - **Tipo de proactiva**: `1` Mensual, `2` Trimestral, `3` Semestral
+   - **vCenters**, separados por coma
+   - **Credenciales** de cada vCenter. Funciona como un llavero: si varios vCenters comparten credenciales, se piden una sola vez.
+3. A partir de ahí no hace falta tocar nada más. La recolección demora entre 15 minutos y 1 hora según el entorno.
+4. Al terminar, los entregables quedan en `resultados\<fecha>\anexo\` (ver sección 4).
 
-### Paso 0 — Resolver la carpeta de esta corrida
+Los tipos de proactiva son acumulativos: la **trimestral** incluye todo lo de la mensual, y la **semestral** incluye la trimestral y la mensual.
 
-Antes de arrancar nada, `lanzador.bat` llama a `src\Resolver-CarpetaResultados.ps1`, que decide en qué carpeta va a quedar todo lo generado hoy:
-
-- Si es la primera vez que se corre el proceso hoy → `resultados\2026-08-07\`
-- Si ya se corrió antes hoy → `resultados\2026-08-07 (1)\`, y así sucesivamente (`(2)`, `(3)`...), igual que Windows nombra un archivo duplicado. Así, dos corridas del mismo día nunca se pisan entre sí.
-
-Este nombre de carpeta se pasa como parámetro a los 3 pasos siguientes, para que los tres procesos (que no comparten memoria entre sí) se pongan de acuerdo en dónde guardar todo.
-
-### Paso 1 — Recolección de datos (`run.bat` → `src\devops-powershell\portable.ps1`)
-
-Se abre una app de consola con un menú interactivo (tildar con números, `e` para ejecutar, `c` para limpiar conexiones, `x` para salir). Hoy el menú tiene 2 opciones activas:
-
-| Opción del menú | Qué hace | Qué genera |
+| Tipo | Qué recolecta | Qué chequeos corre |
 |---|---|---|
-| **Recolección de Datos para Proactiva** | Se conecta a uno o más vCenter y recorre hosts, clusters, VMs, datastores, switches, snapshots, certificados, licencias, alarmas, salud de vCenter, actividad de backup del propio appliance, etc. | Un JSON `<fecha> <hora>_Proactiva.json` |
-| **Recolección de Drivers de Host** | Revisa las tarjetas de red/HBA de cada host ESXi y las compara contra la lista de compatibilidad de hardware (HCL) de VMware | Un JSON `<fecha> <hora>_DriverInfo.json` |
+| Mensual | Datos de Proactiva | `VSP-ME-*` |
+| Trimestral | + drivers/firmware de los hosts | + `VSP-TR-*` |
+| Semestral | (igual que la trimestral) | + `VSP-SE-*` |
 
-Podés tildar una, la otra, o las dos — cada una que tildes y ejecutes agrega su JSON a `resultados\<carpeta de hoy>\json\`, y anota el nombre de ese archivo en `resultado.txt` (ver sección 5).
+La configuración de cada vDS se exporta a `.zip` en **todas** las corridas (depende del cliente cuándo se usa). En las semestrales hay que subir esos `.zip` al Drive; el script lo recuerda al terminar.
 
-Las credenciales de vCenter se piden por consola en el momento (`Get-Credential`), nunca quedan guardadas en ningún archivo.
+No hace falta instalar nada: el proyecto trae su propio PowerShell portátil y todos los módulos necesarios (VMware PowerCLI, ImportExcel) en `runtime\`. Si en una PC puntual algo no carga, corré **`extra\Preparar-Equipo.bat`**: diagnostica los motivos más comunes (Visual C++ Redistributable faltante, proveedor NuGet, otras instalaciones de PowerCLI) y corrige solo lo que es seguro corregir automáticamente.
 
-> Nota: el menú también tiene un plugin de Veeam a medio hacer que quedó **fuera** de esta rama (ver sección 7 — ramas de git). Si algún día se retoma, está resguardado ahí.
+### Regenerar el anexo sin volver a recolectar
 
-### Paso 2 — Conversión a Excel (`src\JSONtoExcels.ps1`)
+Si te equivocaste en el cliente, el mes o el tipo de proactiva, corré **`extra\Regenerar-Anexo.bat`**. Vuelve a preguntar esos datos y regenera el Anexo y la Checklist a partir de la **última corrida**, sin conectarse al vCenter.
 
-Lee `resultado.txt`, y por cada JSON que aparece ahí, genera un Excel con una hoja por cada tipo de dato recolectado (vCenter, ESXi, VM, Datastores, Switches, Snapshots, Particiones, Sizing, Licencias, Certificados, etc.), con estilo (encabezados verdes) y auto-filtro.
+### Uso desde consola (opcional)
 
-Sale un Excel por cada JSON procesado, en `resultados\<carpeta de hoy>\excel\`.
+`src\Start-Proactiva.ps1` acepta todo por parámetro; lo que no se pasa, lo pregunta. Correlo siempre con el PowerShell incluido:
 
-### Paso 3 — Anexo Técnico y Checklist (`src\proactivas-auto2.0.ps1`)
+```powershell
+.\runtime\pwsh.exe -ExecutionPolicy Bypass -File .\src\Start-Proactiva.ps1 -Client "Orbis" -Month "Octubre" -Frequency Quarterly -VCenters vc01.orbis.local,vc02.orbis.local
+```
 
-Solo corre si entre lo recolectado estuvo el reporte "Proactiva" (`lanzador.bat` revisa si `resultado.txt` contiene la palabra `_Proactiva`; si solo corriste Drivers, este paso se salta).
-
-1. Te pide por consola el **nombre del cliente** y el **mes** del reporte.
-2. Te pide qué tareas correr: **1** mensuales, **2** trimestrales, **3** semestrales (podés combinar, ej. `1,2,3` para correrlas todas).
-3. Toma el Excel "Proactiva" más reciente dentro de la carpeta de esta corrida.
-4. Corre cada función de verificación seleccionada (~28 en total — ver sección 6), cada una identificada con un ID tipo `VSP-ME-01`. Cada función lee una hoja específica del Excel, aplica una regla de negocio (ej. "¿hay discos con menos del 30% libre?", "¿hay VMs con snapshots de más de 3 días?", "¿el vCenter está sobredimensionado para su versión?"), y si encuentra algo, agrega una hoja de detalle al **Anexo Técnico**.
-5. En paralelo, copia la plantilla de checklist y completa las columnas Resultado/Detalle de cada ID con lo que encontró cada función, generando la **Checklist**.
-
-Salen dos archivos en `resultados\<carpeta de hoy>\anexo\`:
-- `Anexo Tecnico - {Cliente} - {Mes}.xlsx`
-- `Checklist Proactiva - {Cliente} - {Mes}.xlsx`
-
-Si volvés a correr el paso 3 con el mismo cliente y mes (ej. porque corregiste algo), estos dos archivos se regeneran limpios desde cero — no se van acumulando hojas viejas.
+| Parámetro | Para qué |
+|---|---|
+| `-Client`, `-Month` | Datos del reporte |
+| `-Frequency` | `Monthly`, `Quarterly` o `Semiannual` |
+| `-VCenters` | Lista de vCenters |
+| `-CredentialPath` | Carpeta con credenciales guardadas como `cred-*.xml` (`Get-Credential \| Export-Clixml`). Con esto no se pide nada por consola; pensado para pruebas o corridas desatendidas. Los archivos quedan cifrados con el usuario de Windows: solo ese usuario, en esa PC, puede leerlos. |
+| `-ReportOnly` | Regenera el anexo de una corrida existente (`-RunFolder "2026-10-13"`, o la más reciente) |
+| `-SkipAlarmTest` | No crea la alarma temporal de la prueba de Falso Positivo (ver sección 2) |
 
 ---
 
-## 3. Estructura de carpetas del repositorio
+## 2. El flujo completo
+
+Todo corre en **un solo proceso y una sola ventana**, en tres etapas:
+
+### 1. Recolección (`src\collection\`)
+
+Se conecta a cada vCenter (SOAP + REST/CIS) y recorre hosts, clusters, VMs, datastores, switches, snapshots, certificados, licencias, alarmas, salud de estadísticas, backups del VAMI, etc. El resultado queda en `resultados\<fecha>\json\<fecha hora>_Proactiva.json`. En trimestrales y semestrales, además, recolecta los drivers/firmware de las placas de red y controladoras de cada host (`..._DriverInfo.json`).
+
+Todo lo que hace contra el vCenter es **de solo lectura**, con una excepción: la **prueba de Falso Positivo** (VSP-ME-13) crea una alarma temporal sobre un datastore que ejecuta el mismo script de alertas que ya tiene configurado el cliente, espera a que se dispare y la borra. Con `-SkipAlarmTest` se omite esa parte (el resto de la auditoría de alarmas se hace igual).
+
+### 2. Conversión a Excel (`src\conversion\`)
+
+Cada JSON se convierte en un Excel "crudo" con una hoja por tema (vCenter, ESXi, VM, Datastores, etc.), sin filtrar, en `resultados\<fecha>\excel\`.
+
+### 3. Anexo y Checklist (`src\report\`)
+
+Corre los chequeos que corresponden al tipo de proactiva. Cada chequeo lee una hoja del Excel crudo, aplica su regla (criterios de la KB [Relevamiento vSphere Automático](https://wetcom.atlassian.net/wiki/spaces/PS/pages/2551579347)) y:
+
+- si encuentra algo, agrega una hoja de detalle al **Anexo Técnico**;
+- completa las columnas Estado y Detalle de su ID en la **Checklist** (copia de `src\report\templates\checklist-template.xlsx`).
+
+Las hojas vacías no se generan. Si regenerás el anexo para el mismo cliente y mes, se arma desde cero (no acumula hojas viejas).
+
+---
+
+## 3. Estructura del repositorio
 
 ```
 script-proactivas/
-├── lanzador.bat          ← corre los 3 pasos seguidos (uso normal)
+├── Iniciar-Proactiva.bat         ← doble clic para correr todo (uso normal)
 ├── extra/
-│   ├── Preparar-Equipo.bat      ← diagnostica requisitos de PowerCLI en esta PC
-│   └── ejecucion-manual/
-│       ├── 1-Recoleccion-de-Datos.bat  ← corren un paso individual a mano
-│       ├── 2-Conversion-a-Excel.bat      (ver sección 1)
-│       └── 3-Generar-Anexo.bat
-├── resultado.txt          ← archivo de trabajo temporal (se borra solo, ver sección 5)
-├── resultados/             ← acá quedan todos los entregables, organizados por fecha
-├── runtime/                ← PowerShell portátil + módulos (VMware PowerCLI, ImportExcel).
-│                              No es código propio, no hace falta tocarlo nunca.
-└── src/                     ← todo el código propio del proyecto
-    ├── run.bat
-    ├── JSONtoExcels.ps1
-    ├── proactivas-auto2.0.ps1
-    ├── Resolver-CarpetaResultados.ps1
-    └── devops-powershell/    ← la app de consola del Paso 1
-        ├── portable.ps1      (entry point real)
-        ├── app/               (framework del menú: config, conexiones, UI)
-        └── automatizaciones/  (los plugins del menú + la librería de recolección)
-            └── lib/
-                ├── proactivas.psm1   ← el motor real: clase Proactiva con toda la lógica de recolección
-                ├── check-hcl.ps1, check-vsan-hcl.ps1  ← compatibilidad de hardware (HCL)
-                ├── update-reference.ps1  ← utilidad manual para refrescar los JSON de referencia de HCL
-                └── data/               ← JSON de referencia (HCL, releases de ESXi, sizing de vCenter)
+│   ├── Regenerar-Anexo.bat       ← rehace el anexo de la última corrida sin reconectarse
+│   └── Preparar-Equipo.bat       ← diagnostica requisitos de PowerCLI en esta PC
+├── resultados/                   ← una carpeta por corrida (no se versiona)
+├── runtime/                      ← PowerShell portátil + módulos. No es código propio; no se toca.
+└── src/
+    ├── Start-Proactiva.ps1       ← punto de entrada: pregunta los datos y corre las 3 etapas
+    ├── collection/               ← 1. Recolección
+    │   ├── Collection.psm1           conexión a vCenters (llavero) y armado de los JSON
+    │   ├── ProactivaCollector.psm1   clase con toda la lógica de recolección
+    │   ├── HardwareCompatibility.ps1 búsquedas en la HCL de VMware
+    │   ├── Update-ReferenceData.ps1  utilidad manual: actualiza reference-data\ desde internet
+    │   └── reference-data/           JSON de referencia (HCL, releases de ESXi, sizing, Tools)
+    ├── conversion/               ← 2. JSON → Excel crudo
+    │   └── Conversion.psm1
+    ├── report/                   ← 3. Anexo Técnico y Checklist
+    │   ├── Report.psm1               qué chequeos corren según el tipo de proactiva + checklist
+    │   ├── checks/
+    │   │   ├── MonthlyChecks.ps1     VSP-ME-*
+    │   │   ├── QuarterlyChecks.ps1   VSP-TR-*
+    │   │   └── SemiannualChecks.ps1  VSP-SE-*
+    │   └── templates/checklist-template.xlsx
+    ├── shared/                   ← carpeta de corrida y estilo de Excel, usados por varias etapas
+    └── tools/
+        └── Initialize-Workstation.ps1  (lo lanza extra\Preparar-Equipo.bat)
 ```
+
+El código (nombres de archivos, funciones, variables y comentarios) está en inglés. Lo que ve el técnico (mensajes de consola) y los entregables (nombres de hojas, textos de la checklist) están en español.
 
 ---
 
-## 4. Qué archivos quedan al finalizar una ejecución
-
-Después de correr `lanzador.bat` completo (los 3 pasos, con Proactiva incluido), en `resultados\<fecha>[ (N)]\` vas a encontrar:
+## 4. Qué queda al finalizar una corrida
 
 ```
-resultados/2026-08-07/
-├── json/
-│   ├── 2026-08-07 163854_Proactiva.json      ← dato crudo recolectado del vCenter
-│   └── 2026-08-07 164014_DriverInfo.json     ← (si tildaste ese plugin)
-├── excel/
-│   ├── 2026-08-07 163854_Proactiva.xlsx      ← mismo dato, en Excel con una hoja por tema
-│   └── 2026-08-07 164014_DriverInfo.xlsx
+resultados/2026-10-13/
 ├── anexo/
-│   ├── Anexo Tecnico - {Cliente} - {Mes}.xlsx     ← ENTREGABLE: detalle de hallazgos
-│   └── Checklist Proactiva - {Cliente} - {Mes}.xlsx ← ENTREGABLE: checklist para el cliente
+│   ├── Anexo Tecnico - {Cliente} - {Mes}.xlsx        ← ENTREGABLE: detalle de hallazgos
+│   └── Checklist Proactiva - {Cliente} - {Mes}.xlsx  ← ENTREGABLE: checklist para el cliente
+├── excel/
+│   ├── 2026-10-13 163854_Proactiva.xlsx      ← datos crudos, una hoja por tema
+│   └── 2026-10-13 164014_DriverInfo.xlsx     ← (trimestral/semestral)
+├── json/                                     ← los mismos datos, en JSON
+├── vds_configuration/                        ← .zip con la configuración de cada vDS
 └── logs/
-    ├── <hora>_portable.log         ← todo lo que pasó en el Paso 1 (recolección)
-    ├── <hora>_JSONtoExcels.log     ← todo lo que pasó en el Paso 2 (conversión)
-    └── <hora>_proactivas-auto.log  ← todo lo que pasó en el Paso 3 (Anexo/Checklist)
+    └── <fecha hora>_proactiva.log            ← todo lo que pasó en la corrida
 ```
 
-Los dos archivos que le mandás al cliente son los de `anexo\`. El resto (`json/`, `excel/`, `logs/`) es material de trabajo/diagnóstico — útil si algo sale mal o si querés reprocesar sin volver a conectarte al vCenter.
-
-Si corrés el proceso una segunda vez el mismo día, se crea `resultados\2026-08-07 (1)\` con su propio set completo de las 4 carpetas — nunca se mezcla ni se pisa con la corrida anterior.
+Si corrés el proceso más de una vez el mismo día, cada corrida tiene su propia carpeta: `resultados\2026-10-13 (1)\`, `(2)`, etc. Nunca se pisan.
 
 ---
 
-## 5. ¿Qué es `resultado.txt`?
+## 5. Los chequeos (IDs `VSP-*`)
 
-Es una lista de trabajo temporal que conecta los 3 pasos (que corren como procesos separados y no comparten memoria):
+**Mensuales:** `ME-01` Sizing del vCenter · `ME-02` Espacio en particiones del VCSA · `ME-03` Tamaño de snapshots · `ME-04` Syslog · `ME-05` Políticas de multipath · `ME-06` Consistencia de versiones ESXi por cluster · `ME-07` Consistencia de recursos por cluster · `ME-08` Placas E1000 en VMs Windows · `ME-12` Timeouts de ESXi Shell (TSM) · `ME-13` Alarmas / Falso Positivo · `ME-14` Power Management · `ME-15` VMware Tools · `ME-16` ISOs conectadas · `ME-17` Placas que no inician conectadas · `ME-18` Snapshots de más de 14 días
 
-- Cada plugin que corrés en el Paso 1 (Proactiva, DriverInfo) agrega ahí el nombre del JSON que acaba de generar.
-- El Paso 2 lo lee para saber exactamente qué JSON son de esta corrida (no reprocesa todo lo que haya en `resultados\`).
-- `lanzador.bat` lo usa para decidir si vale la pena correr el Paso 3 (busca la palabra `_Proactiva`).
-- Al terminar el Paso 3 (o antes, si no correspondía), `lanzador.bat` lo borra.
+**Trimestrales:** `TR-01` Fin de soporte de ESXi · `TR-02` Compatibilidad de hardware (HCL) · `TR-03` NTP · `TR-04` Drivers y firmware · `TR-05` DNS · `TR-06` Licencias · `TR-07` Certificados del vCenter · `TR-08` Certificados de ESXi · `TR-09` Vencimiento de la password de root del vCenter · `TR-10` Salud de estadísticas de performance · `TR-11` NIOC en vDS · `TR-12` Consistencia de port groups en standard switches
 
-No hace falta administrarlo manualmente ni se puede sacar del flujo del todo: los pasos 2 y 3 lo necesitan para saber qué procesar. Pero no guarda nada valioso — es pura plomería interna, se recrea y se borra solo en cada corrida.
+**Semestrales:** `SE-01` Backup de configuración de vDS · `SE-02` Backups del VAMI
 
----
+**TR-04 (Drivers):** lista todas las placas en la hoja "Host Drivers" del anexo y marca "No compatible" si alguna no figura en la HCL para la release de su host. Las versiones de driver/firmware no se pueden validar automáticamente con los datos de referencia, así que si no hay incompatibilidades el Estado queda en blanco para que el técnico lo complete revisando la URL de cada placa.
 
-## 6. Los checklist (IDs `VSP-*`)
-
-Cada función de verificación del Paso 3 corresponde a un ítem con un ID fijo en la plantilla de Checklist (`src\devops-powershell\templete\Checklist Proactiva Actualizada - Cliente - Mes.xlsx`). Se agrupan en mensuales, trimestrales y semestrales:
-
-**Mensuales:** `VSP-ME-01` Sizing del vCenter · `02` Espacio en particiones · `03` Snapshots antiguos · `04` Configuración de Syslog · `05` Multipath de storage · `06` Consistencia de versiones ESXi · `07` Recomendaciones de configuración · `08` Placas de red no recomendadas (E1000) · `12` TSM/SSH habilitado · `13` Falso positivo de alarmas · `14` Patch management · `15` VMware Tools desactualizadas · `16` ISOs montadas · `17` Placas de red · `18` Snapshots
-
-**Trimestrales:** `VSP-TR-01` Fin de soporte (EOL) · `02` Compatibilidad de componentes (HCL) · `03` Configuración NTP · `04` Drivers (informativo) · `05` Configuración DNS · `06` Vencimiento de licencias · `07` Certificado de vCenter · `08` Certificado de ESXi · `09` Cuenta root de vCenter · `10` Salud de performance · `11` NIOC · `12` vSwitch estándar
-
-**Semestrales:** `VSP-SE-01` Backup de configuración de vDS · `SEC-02`/`SEC-03` Certificados (seguridad) · `SE-02` Actividad de backup
-
-Cada función lee una hoja puntual del Excel generado en el Paso 2, aplica su regla, y si encuentra un problema arma una hoja de detalle en el Anexo Técnico además de marcar el resultado en la Checklist.
+**Datos de referencia:** TR-02 y TR-04 dependen de los JSON de `src\collection\reference-data\`. Si están desactualizados, hosts soportados aparecen como no soportados (TR-02) o "Sin datos" (TR-04). Para actualizarlos: `.\runtime\pwsh.exe -File .\src\collection\Update-ReferenceData.ps1`.
 
 ---
 
-## 7. Ramas de git
+## 6. Ramas de git
 
-- **`main`** — código probado y funcionando. **No se pushea sin autorización explícita.**
-- **`development`** — rama de trabajo activa. Acá se prueban los cambios antes de promoverlos a `main`.
-- **`backup/vrops-veeam-sin-implementar`** — resguardo de automatizaciones que quedaron sin terminar (varios plugins de consulta a vROps, y la integración con Veeam). No están en `development`/`main` porque nunca se terminaron de probar, pero quedan ahí por si en algún momento se retoman.
+- **`main`**: código probado y funcionando. **No se pushea sin autorización explícita.**
+- **`development`**: rama de trabajo activa. Acá se prueban los cambios antes de pasarlos a `main`.
+- **`backup/vrops-veeam-sin-implementar`**: resguardo de automatizaciones que quedaron sin terminar (consultas a vROps e integración con Veeam). No están en `development` ni en `main` porque nunca se terminaron de probar.
 
 ---
 
-## 8. Notas para quien vaya a tocar el código
+## 7. Notas para quien vaya a tocar el código
 
-- **No mover `runtime/` de lugar** sin actualizar las rutas relativas que apuntan a `pwsh.exe` y `Modules\` (en `lanzador.bat`, `run.bat` y `portable.ps1`).
-- Los 3 pasos del pipeline (`portable.ps1`, `JSONtoExcels.ps1`, `proactivas-auto2.0.ps1`) reciben la carpeta de la corrida por parámetro (`-CarpetaResultados`). Si los corrés sueltos para debug sin pasar el parámetro, caen solos a la carpeta más reciente dentro de `resultados\`.
-- `src\devops-powershell\automatizaciones\lib\proactivas.psm1` hace *dot-sourcing* de algunos archivos con rutas relativas al directorio de trabajo (no a `$PSScriptRoot`) — funciona porque `portable.ps1` se para en `devops-powershell\` antes de arrancar. Si se reorganiza esa carpeta, hay que tener esto en cuenta.
-- `src\devops-powershell\automatizaciones\lib\update-reference.ps1` es una utilidad de mantenimiento manual (no se corre sola) que refresca los JSON de referencia de HCL/ESXi/vSAN desde internet. Conviene correrla de tanto en tanto para que las validaciones de compatibilidad no queden desactualizadas.
+- **Los nombres de hojas y columnas del Excel crudo** (`ProactivaCollector.GetReport()`) son un contrato: los chequeos los leen por nombre. Incluye nombres raros heredados, como la hoja `Certficate`.
+- **Los nombres de hojas del anexo y los textos de la checklist** son lo que recibe el cliente; otros procesos los consumen. No cambiarlos sin coordinarlo.
+- **Agregar un chequeo**: escribir la función `Test-*` en el archivo de su periodicidad dentro de `src\report\checks\` (recibe `$Context`, devuelve `@{ ID; Resultado; Detalle }`) y agregar su nombre a la lista correspondiente en `Report.psm1`. El orden de esa lista es el orden de las hojas en el anexo.
+- **No mover `runtime/`** sin actualizar las rutas de los `.bat` y de `Start-Proactiva.ps1`, que cargan los módulos por ruta completa (para que nunca gane otra instalación de PowerCLI de la PC).

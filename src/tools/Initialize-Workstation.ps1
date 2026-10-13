@@ -1,27 +1,26 @@
 #Requires -Version 5.1
-# Diagnostica y (donde es seguro) corrige los motivos mas comunes por los que PowerCLI
-# no carga en una PC nueva, aunque el proyecto ya trae los modulos incluidos en runtime\.
-# No reinstala PowerCLI (ya viene bundleado) -- se enfoca en lo que falta ALREDEDOR
-# de PowerCLI para que esos modulos carguen bien.
+# Diagnoses (and fixes where it is safe) the usual reasons PowerCLI does not load on a new
+# PC, even though the project already bundles the modules in runtime\. It does not reinstall
+# PowerCLI; it checks what PowerCLI needs AROUND it to load. Launched by extra\Preparar-Equipo.bat.
 
-$baseDir = Split-Path -Path $PSScriptRoot -Parent
-$modulesDir = Join-Path -Path $baseDir -ChildPath "runtime\Modules"
+$repoRoot = Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent
+$modulesFolder = Join-Path -Path $repoRoot -ChildPath "runtime\Modules"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " Diagnostico de requisitos para script-proactivas" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-$huboProblemas = $false
+$foundProblems = $false
 
 # -----------------------------------------------------------------------
-# 1. Visual C++ Redistributable x64 (varios componentes nativos de PowerCLI lo necesitan)
+# 1. Visual C++ Redistributable x64 (several native PowerCLI components need it)
 # -----------------------------------------------------------------------
 Write-Host "[1/4] Visual C++ Redistributable (x64)..." -NoNewline
-$vcRuta = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
-$vcInstalado = (Test-Path $vcRuta) -and ((Get-ItemProperty -Path $vcRuta -ErrorAction SilentlyContinue).Installed -eq 1)
+$vcRegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+$vcInstalled = (Test-Path $vcRegistryPath) -and ((Get-ItemProperty -Path $vcRegistryPath -ErrorAction SilentlyContinue).Installed -eq 1)
 
-if ($vcInstalado) {
+if ($vcInstalled) {
     Write-Host " OK" -ForegroundColor Green
 } else {
     Write-Host " FALTA" -ForegroundColor Red
@@ -29,17 +28,17 @@ if ($vcInstalado) {
     Write-Host "        lo necesitan para cargar. No lo instalamos automaticamente porque requiere" -ForegroundColor Yellow
     Write-Host "        permisos de administrador y reiniciar en algunos casos. Descargalo de:" -ForegroundColor Yellow
     Write-Host "        https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Yellow
-    $huboProblemas = $true
+    $foundProblems = $true
 }
 
 # -----------------------------------------------------------------------
-# 2. Proveedor NuGet (lo pide PowerShellGet la primera vez que se instala un modulo,
-#    ej. ImportExcel en el Paso 3 si no esta ya instalado). Esto SI es seguro de resolver solo.
+# 2. NuGet package provider (PowerShellGet asks for it the first time a module is installed).
+#    Safe to fix automatically.
 # -----------------------------------------------------------------------
 Write-Host "[2/4] Proveedor de paquetes NuGet..." -NoNewline
-$nugetInstalado = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
+$nugetInstalled = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
 
-if ($nugetInstalado) {
+if ($nugetInstalled) {
     Write-Host " OK" -ForegroundColor Green
 } else {
     Write-Host " FALTA -> instalando..." -ForegroundColor Yellow
@@ -48,35 +47,34 @@ if ($nugetInstalado) {
         Write-Host "        Instalado correctamente." -ForegroundColor Green
     } catch {
         Write-Host "        No se pudo instalar automaticamente: $($_.Exception.Message)" -ForegroundColor Red
-        $huboProblemas = $true
+        $foundProblems = $true
     }
 }
 
 # -----------------------------------------------------------------------
-# 3. Otra instalacion de PowerCLI en la PC que pueda pisar/confundirse con la incluida
+# 3. Another PowerCLI installation on the PC that could be confused with the bundled one
 # -----------------------------------------------------------------------
 Write-Host "[3/4] Instalaciones de PowerCLI fuera del proyecto..." -NoNewline
-$otrasPowerCLI = Get-Module -ListAvailable -Name "VMware.PowerCLI", "VMware.VimAutomation.Core" -ErrorAction SilentlyContinue |
-    Where-Object { $_.ModuleBase -notlike "$modulesDir*" }
+$otherPowerCli = Get-Module -ListAvailable -Name "VMware.PowerCLI", "VMware.VimAutomation.Core" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ModuleBase -notlike "$modulesFolder*" }
 
-if (-not $otrasPowerCLI) {
+if (-not $otherPowerCli) {
     Write-Host " OK (ninguna)" -ForegroundColor Green
 } else {
     Write-Host " ENCONTRADAS" -ForegroundColor Yellow
     Write-Host "        Esta PC tiene PowerCLI instalado fuera de la carpeta runtime\ del proyecto:" -ForegroundColor Yellow
-    $otrasPowerCLI | Select-Object Name, Version, ModuleBase -Unique | ForEach-Object {
+    $otherPowerCli | Select-Object Name, Version, ModuleBase -Unique | ForEach-Object {
         Write-Host "        - $($_.Name) $($_.Version)  ($($_.ModuleBase))" -ForegroundColor Yellow
     }
-    Write-Host "        No debería causar problemas (el proyecto carga sus modulos por ruta completa," -ForegroundColor Yellow
+    Write-Host "        No deberia causar problemas (el proyecto carga sus modulos por ruta completa," -ForegroundColor Yellow
     Write-Host "        no por nombre), pero si algo falla mas abajo, puede ser un conflicto de versiones." -ForegroundColor Yellow
 }
 
 # -----------------------------------------------------------------------
-# 4. Import real de cada modulo de PowerCLI que usa el proyecto, sin ocultar errores
-#    (a diferencia de la corrida normal, que los silencia para no ensuciar la consola).
+# 4. Actually import each bundled PowerCLI module, showing the real errors
 # -----------------------------------------------------------------------
 Write-Host "[4/4] Carga de los modulos de PowerCLI incluidos..."
-$modulosProyecto = @(
+$projectModules = @(
     "VMware.VimAutomation.Cis.Core",
     "VMware.VimAutomation.Common",
     "VMware.VimAutomation.Core",
@@ -84,25 +82,25 @@ $modulosProyecto = @(
     "VMware.VimAutomation.Sdk"
 )
 
-foreach ($nombreModulo in $modulosProyecto) {
-    Write-Host "        - $nombreModulo..." -NoNewline
+foreach ($moduleName in $projectModules) {
+    Write-Host "        - $moduleName..." -NoNewline
     try {
-        Import-Module (Join-Path $modulesDir $nombreModulo) -ErrorAction Stop
+        Import-Module (Join-Path $modulesFolder $moduleName) -ErrorAction Stop
         Write-Host " OK" -ForegroundColor Green
     } catch {
         Write-Host " FALLA" -ForegroundColor Red
         Write-Host "          $($_.Exception.Message)" -ForegroundColor Red
-        $huboProblemas = $true
+        $foundProblems = $true
     }
 }
 
 Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Cyan
-if ($huboProblemas) {
+if ($foundProblems) {
     Write-Host " Hay puntos para revisar (ver arriba en rojo/amarillo)." -ForegroundColor Yellow
     Write-Host " Si despues de instalar el Visual C++ Redistributable el problema sigue," -ForegroundColor Yellow
     Write-Host " copia el mensaje de error completo para que lo revisemos." -ForegroundColor Yellow
 } else {
-    Write-Host " Todo en orden. Esta PC deberia poder correr lanzador.bat sin problemas." -ForegroundColor Green
+    Write-Host " Todo en orden. Esta PC deberia poder correr Iniciar-Proactiva.bat sin problemas." -ForegroundColor Green
 }
 Write-Host "==========================================================" -ForegroundColor Cyan
