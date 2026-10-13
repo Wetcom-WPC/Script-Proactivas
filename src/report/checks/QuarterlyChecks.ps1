@@ -116,7 +116,7 @@ function Test-NtpConfiguration($Context) {
     $detail = "Todos los hosts tienen NTP configurado, en ejecucion y consistente por cluster."
 
     if ($foundNotConfigured) {
-        $result = "No configurado"
+        $result = "No Configurado"
         $detail = "Se encontraron hosts sin un servidor NTP configurado"
     } elseif ($foundServiceStopped) {
         $result = "Configurado y servicio no activo"
@@ -250,7 +250,7 @@ function Test-DnsConfiguration($Context) {
         }
         Export-AnnexSheet -Data $annexRows -Path $Context.AnnexPath -WorksheetName "Host DNS" -NoNumberConversion "Hostname"
 
-        return [PSCustomObject]@{ ID = "VSP-TR-05"; Resultado = "Cluster no consistente"; Detalle = "Al menos un host no tiene un servidor DNS configurado, o no hay consistencia en un cluster" }
+        return [PSCustomObject]@{ ID = "VSP-TR-05"; Resultado = "Cluster No Consistente"; Detalle = "Al menos un host no tiene un servidor DNS configurado, o no hay consistencia en un cluster" }
     }
 
     return [PSCustomObject]@{ ID = "VSP-TR-05"; Resultado = "Resultado Esperado"; Detalle = "Todos los host tienen servidores DNS configurados y son consistenetes por cluster" }
