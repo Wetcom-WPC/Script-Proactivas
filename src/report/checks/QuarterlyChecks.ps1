@@ -566,6 +566,7 @@ function Test-VCenterRootPassword($Context) {
 
     $foundExpired = $false
     $foundExpiringSoon = $false
+    $unreadable = @()
 
     foreach ($row in $vcenters) {
         $expiration = $row."Expiration Date"
@@ -576,9 +577,10 @@ function Test-VCenterRootPassword($Context) {
             $evaluation = "Resultado Esperado"
         }
         elseif ($expiration -eq "N/A" -or $row.Status -like "*Error*" -or $row.Status -like "*Unknown*") {
-            # A read error on this vCenter only; the global result is not "Sin acceso"
+            # The appliance API did not return the root account (often a permissions matter)
             $evaluation = "Error de lectura"
             $isFinding = $true
+            $unreadable += $row."vCenter Server"
         }
         else {
             try {
@@ -616,17 +618,23 @@ function Test-VCenterRootPassword($Context) {
         }
     }
 
-    # Read errors alone keep "Resultado Esperado": only dates decide the result
+    # Dates decide the result. When no vCenter could be read at all, there is nothing to vouch
+    # for: "Sin acceso" instead of a "Resultado Esperado" nobody checked.
+    $unreadableNote = if ($unreadable.Count -gt 0) { " No se pudo leer la expiracion en: $($unreadable -join ', ') (revisar manualmente en la VAMI)." } else { "" }
     $result = "Resultado Esperado"
-    $detail = "Las contraseñas de root no expiran o vencen en más de 6 meses."
+    $detail = "Las contraseñas de root no expiran o vencen en más de 6 meses.$unreadableNote"
 
     if ($foundExpired) {
         $result = "Vencido"
-        $detail = "Se detectaron contraseñas de root ya expiradas."
+        $detail = "Se detectaron contraseñas de root ya expiradas.$unreadableNote"
     }
     elseif ($foundExpiringSoon) {
         $result = "Vencimiento < 6 meses"
-        $detail = "Se detectaron contraseñas próximas a vencer (menos de 6 meses)."
+        $detail = "Se detectaron contraseñas próximas a vencer (menos de 6 meses).$unreadableNote"
+    }
+    elseif ($unreadable.Count -eq $vcenters.Count) {
+        $result = "Sin acceso"
+        $detail = "No se pudo leer la expiracion de la password de root en ningun vCenter (la API de la VAMI no devolvio la cuenta; suele requerir permisos de administrador del appliance). Revisar manualmente en la VAMI."
     }
 
     if ($findings.Count -gt 0) {

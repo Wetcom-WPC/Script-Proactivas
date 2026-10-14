@@ -563,12 +563,19 @@ function Test-AlarmConfiguration($Context) {
     $failureCount = 0
     $causes = @()
     $scriptArguments = @()
+    $testSkipped = $false
 
     foreach ($row in $rows) {
         $result = if ($row.Result) { $row.Result.ToString().Trim() } else { "" }
         $alarmName = if ($row."Alarm Name") { $row."Alarm Name" } else { $row."Alarm Source" }
         $scriptPath = if ($row."Script Path") { $row."Script Path" } else { $row."Alarm Path" }
         if (-not $scriptPath) { $scriptPath = $row."Path Alarma" }
+
+        # Run with -SkipAlarmTest: the "Falso Positivo" test did not run, which is not a failure
+        if ($result -like "Omitida*") {
+            $testSkipped = $true
+            continue
+        }
 
         # Success: OK, SUCCESS, or messages starting with SUCCESS
         if ($result -eq "OK" -or $result -match "^SUCCESS") {
@@ -636,6 +643,10 @@ function Test-AlarmConfiguration($Context) {
     if ($failureCount -gt 0) {
         $checklistResult = "No recomendado"
         $detail = "Se detectaron $failureCount anomalías. Causas: $($causes -join ", ").$inconsistencyNote"
+    }
+
+    if ($testSkipped) {
+        $detail += " La prueba de Falso Positivo no se ejecuto (corrida con -SkipAlarmTest): solo se audito la configuracion de las alarmas."
     }
 
     if ($findings.Count -gt 0) {

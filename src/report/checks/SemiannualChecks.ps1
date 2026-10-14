@@ -76,7 +76,7 @@ function Test-VamiBackup($Context) {
         foreach ($backup in $backups) {
             $startDate = $null
             try {
-                if ($backup.StartTime -and $backup.StartTime -ne "N/A") {
+                if ($backup.StartTime -and $backup.StartTime -notin @("N/A", "-")) {
                     $startDate = Get-Date $backup.StartTime -ErrorAction Stop
                 }
             } catch {}

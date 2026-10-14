@@ -613,7 +613,8 @@ class ProactivaCollector {
             # File name: <vCenter>_<switch>_<date>.zip
             $vcenterSafeName = $this.currentVCenter -replace '[^a-zA-Z0-9]', '_'
             $timestamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
-            $fileName = "${vcenterSafeName}_$($vds.Name)_$timestamp.zip"
+            $vdsSafeName = $vds.Name -replace '[\\/:*?"<>|]', '_'   # characters Windows does not allow in file names
+            $fileName = "${vcenterSafeName}_${vdsSafeName}_$timestamp.zip"
 
             try {
                 Export-VDSwitch -VDSwitch $vds -Destination (Join-Path -Path $backupFolder -ChildPath $fileName) -ErrorAction Stop
