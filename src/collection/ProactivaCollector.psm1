@@ -43,6 +43,9 @@ class ProactivaCollector {
     [hashtable] $datacenterByHostId = @{}
     $currentClusters = $null
 
+    # Every datastore of the current vCenter (Get-Datastore, read once by SetDatastores)
+    $currentDatastores = $null
+
     # Every datastore name already listed in the Datastores sheet (vSAN ones are listed once)
     [System.Collections.Generic.HashSet[string]] $listedDatastores = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
@@ -89,6 +92,18 @@ class ProactivaCollector {
         $this.clusterByHostId = @{}
         $this.datacenterByHostId = @{}
         $this.currentClusters = $null
+        $this.currentDatastores = $null
+    }
+
+    # Every datastore of the current vCenter, shared by the alarm test and CollectDatastores
+    SetDatastores($datastores) {
+        $this.currentDatastores = @($datastores)
+    }
+
+    # Datastores of the current vCenter: the ones given to SetDatastores, or a fresh query
+    [object[]] GetDatastores() {
+        if ($null -eq $this.currentDatastores) { $this.currentDatastores = @(Get-Datastore -Server $this.currentVCenter) }
+        return $this.currentDatastores
     }
 
     # Maps every host of the current vCenter to its cluster and datacenter, so the Collect*
@@ -136,6 +151,12 @@ class ProactivaCollector {
 
         $serverContext = $this.currentVCenter
 
+        # Advanced settings and certificates of every reachable host in a few bulk queries;
+        # the rest of the host configuration comes from the ExtensionData Get-VMHost already read
+        $reachableHosts = @($hosts | Where-Object { @("Connected", "Maintenance") -contains $_.ConnectionState })
+        $settingsByHostId = $this.GetAdvancedSettings($reachableHosts)
+        $certManagerByHostId = $this.GetCertificateManagers($reachableHosts)
+
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
             $h = $hosts[$count]
@@ -153,39 +174,36 @@ class ProactivaCollector {
             }
 
             if (@("Connected", "Maintenance") -contains $h.ConnectionState) {
-                $advancedSettings = $h | Get-AdvancedSetting
+                # Name -> value, case-insensitive like the -eq it replaces. Hosts whose bulk query
+                # failed are read one by one, as before.
+                $advancedSettings = $settingsByHostId[$h.Id]
+                if ($null -eq $advancedSettings) {
+                    $advancedSettings = New-SettingDictionary ($h | Get-AdvancedSetting)
+                }
 
-                $shellTimeoutSetting = $advancedSettings | Where-Object { $_.name -eq 'UserVars.ESXIShellTimeOut' }
-                $shellTimeout = if ($shellTimeoutSetting) { $shellTimeoutSetting.Value } else { $null }
+                $shellTimeout = $advancedSettings['UserVars.ESXIShellTimeOut']
+                $interactiveTimeout = $advancedSettings['UserVars.ESXIShellinteractiveTimeOut']
+                $syslogLogDir = $advancedSettings['Syslog.global.logDir']
+                $syslogLogHost = $advancedSettings['Syslog.global.logHost']
 
-                $interactiveTimeoutSetting = $advancedSettings | Where-Object { $_.name -eq 'UserVars.ESXIShellinteractiveTimeOut' }
-                $interactiveTimeout = if ($interactiveTimeoutSetting) { $interactiveTimeoutSetting.Value } else { $null }
-
-                $logDirSetting = $advancedSettings | Where-Object { $_.name -eq 'Syslog.global.logDir' }
-                $syslogLogDir = if ($logDirSetting) { $logDirSetting.Value } else { $null }
-
-                $logHostSetting = $advancedSettings | Where-Object { $_.name -eq 'Syslog.global.logHost' }
-                $syslogLogHost = if ($logHostSetting) { $logHostSetting.Value } else { $null }
-
-                $ntpService = $h | Get-VMHostService | Where-Object { $_.key -eq "ntpd" }
+                # Same data Get-VMHostService / Get-VMHostNtpServer read, already in ExtensionData
+                $ntpService = $h.ExtensionData.Config.Service.Service | Where-Object { $_.Key -eq "ntpd" }
                 $ntpdRunning = if ($ntpService) { $ntpService.Running.ToString() } else { "Not Available" }
 
-                $ntpServers = ""
-                try {
-                    $ntpServers = ($h | Get-VMHostNtpServer -ErrorAction Stop) -join ","
-                }
-                catch {
-                    $ntpServers = ""
-                }
+                $ntpServers = @($h.ExtensionData.Config.DateTimeInfo.NtpConfig.Server) -join ","
 
                 $certValidTo = $null
                 $certStatus = "Unknown"
                 $certIssuer = ""
 
                 try {
-                    # -Server makes sure the certificate manager is read from this vCenter
                     if ($h.ExtensionData.ConfigManager.CertificateManager) {
-                        $certManager = Get-View -Id $h.ExtensionData.ConfigManager.CertificateManager -Server $serverContext -ErrorAction Stop
+                        # From the bulk query; one by one only if it failed. -Server makes sure
+                        # the certificate manager is read from this vCenter
+                        $certManager = $certManagerByHostId[$h.Id]
+                        if ($null -eq $certManager) {
+                            $certManager = Get-View -Id $h.ExtensionData.ConfigManager.CertificateManager -Server $serverContext -ErrorAction Stop
+                        }
 
                         if ($certManager.CertificateInfo) {
                             $certInfo = $certManager.CertificateInfo
@@ -257,6 +275,57 @@ class ProactivaCollector {
                 Reference                   = $hclResult.Reference
             })
         }
+    }
+
+    # Advanced settings of the given hosts, by host Id, as name -> value dictionaries. One
+    # Get-View per batch of hosts instead of one Get-AdvancedSetting per host; hosts of a batch
+    # that fails are left out (the caller reads them one by one).
+    [hashtable] GetAdvancedSettings($hosts) {
+        $settingsByHostId = @{}
+        $hostIdByManager = @{}
+        foreach ($h in $hosts) {
+            $managerRef = $h.ExtensionData.ConfigManager.AdvancedOption
+            if ($managerRef) { $hostIdByManager["$($managerRef.Type)-$($managerRef.Value)"] = @{ HostId = $h.Id; Ref = $managerRef } }
+        }
+
+        $managers = @($hostIdByManager.Values)
+        $batchSize = 20
+        for ($start = 0; $start -lt $managers.Count; $start += $batchSize) {
+            $batch = @($managers[$start..([math]::Min($start + $batchSize, $managers.Count) - 1)])
+            try {
+                foreach ($view in (Get-View -Id @($batch | ForEach-Object { $_.Ref }) -Property Setting -Server $this.currentVCenter -ErrorAction Stop)) {
+                    $entry = $hostIdByManager["$($view.MoRef.Type)-$($view.MoRef.Value)"]
+                    if ($entry) { $settingsByHostId[$entry.HostId] = New-SettingDictionary $view.Setting }
+                }
+            }
+            catch {
+                # Left out: read with Get-AdvancedSetting
+            }
+        }
+        return $settingsByHostId
+    }
+
+    # CertificateManager views (with CertificateInfo) of the given hosts, by host Id, in one
+    # Get-View. If it fails the result is empty and the caller asks host by host.
+    [hashtable] GetCertificateManagers($hosts) {
+        $managerByHostId = @{}
+        $hostIdByManager = @{}
+        foreach ($h in $hosts) {
+            $managerRef = $h.ExtensionData.ConfigManager.CertificateManager
+            if ($managerRef) { $hostIdByManager["$($managerRef.Type)-$($managerRef.Value)"] = @{ HostId = $h.Id; Ref = $managerRef } }
+        }
+        if ($hostIdByManager.Count -eq 0) { return $managerByHostId }
+
+        try {
+            foreach ($view in (Get-View -Id @($hostIdByManager.Values | ForEach-Object { $_.Ref }) -Property CertificateInfo -Server $this.currentVCenter -ErrorAction Stop)) {
+                $entry = $hostIdByManager["$($view.MoRef.Type)-$($view.MoRef.Value)"]
+                if ($entry) { $managerByHostId[$entry.HostId] = $view }
+            }
+        }
+        catch {
+            # Empty: read host by host
+        }
+        return $managerByHostId
     }
 
     # Network cards and storage controllers of every host, matched against the IO HCL.
@@ -346,26 +415,23 @@ class ProactivaCollector {
         }
     }
 
+    # $vms come from Get-VmInventory: their network cards and ISOs are already part of each VM
     CollectVms($vms, $clusters, $snapshots) {
         $vms = $vms | ForEach-Object { $_ }
 
         Write-Host "`tProcesando placas de red de VMs..." -NoNewline
-        $connectedIsos = $vms | Get-CDDrive | Where-Object { $null -ne $_.IsoPath }
-        $allNetworkAdapters = $vms | Get-NetworkAdapter
+        $allNetworkAdapters = @($vms | ForEach-Object { $_.NetworkAdapters })
         $this.CollectVmNetwork($allNetworkAdapters)
 
-        # Network cards, ISOs and snapshots grouped by VM once, instead of a Where-Object over
-        # all of them for every VM
-        $adaptersByVm = Group-ById $allNetworkAdapters { param($adapter) $adapter.ParentId }
-        $isosByVm = Group-ById $connectedIsos { param($cdDrive) $cdDrive.ParentId }
+        # Snapshots grouped by VM once, instead of a Where-Object over all of them for every VM
         $snapshotsByVm = Group-ById $snapshots { param($snapshot) $snapshot.VM.Id }
 
         Write-Host "`tProcesando VMs..." -NoNewline
         for ($count = 0; $count -lt $vms.Count; $count++) {
             $vm = $vms[$count]
             Show-Progress $vms.Count ($count + 1)
-            $networkAdapters = $adaptersByVm[$vm.Id]
-            $nicCount = if ($networkAdapters) { $networkAdapters.Count } else { 0 }
+            $networkAdapters = $vm.NetworkAdapters
+            $nicCount = $networkAdapters.Count
             $toolsRequiredVersion = $this.GetToolsReference($vm.VMHost)
             [void]$this.vmReport.Add([PSCustomObject]@{
                 vCenter              = $this.currentVCenter
@@ -383,7 +449,7 @@ class ProactivaCollector {
                 ToolsRequiredVersion = $toolsRequiredVersion
                 "SO (vCenter)"       = $vm.ExtensionData.Config.GuestFullName
                 "SO (Tools)"         = $vm.ExtensionData.Guest.GuestFullName
-                IsoConnected         = Get-SingleOrArray ($isosByVm[$vm.Id] | ForEach-Object { $_.IsoPath })
+                IsoConnected         = Get-SingleOrArray $vm.IsoPaths
                 Adapter_01           = if ($nicCount -gt 0) { $networkAdapters[0].Type.ToString() } else { "" }
                 Adapter_02           = if ($nicCount -gt 1) { $networkAdapters[1].Type.ToString() } else { "" }
                 Adapter_03           = if ($nicCount -gt 2) { $networkAdapters[2].Type.ToString() } else { "" }
@@ -455,17 +521,22 @@ class ProactivaCollector {
     CollectDatastores($hosts) {
         Write-Host "`tProcesando datastores..." -NoNewline
 
+        # Every datastore once, then each host's own from its ExtensionData.Datastore list (the
+        # list "$h | Get-Datastore" reads); its LUNs come from ExtensionData too
+        $datastoresById = @{}
+        foreach ($datastore in $this.GetDatastores()) { $datastoresById[$datastore.Id] = $datastore }
+
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
             $h = $hosts[$count]
             $esxName = $h.Name
 
-            $allDatastores = $h | Get-Datastore
+            $allDatastores = @($h.ExtensionData.Datastore | ForEach-Object { $datastoresById["$($_.Type)-$($_.Value)"] } | Where-Object { $_ })
             $vmfsDatastores = $allDatastores | Where-Object { $_.Type -ne "vsan" }
-            $hostView = Get-View -Id $h.Id -Property Name, Config.StorageDevice -Server $this.currentVCenter
+            $storageDevice = $h.ExtensionData.Config.StorageDevice
 
-            foreach ($lun in $hostView.Config.StorageDevice.MultipathInfo.Lun) {
-                $scsiLun = $hostView.Config.StorageDevice.ScsiLun | Where-Object { $_.Key -eq $lun.Lun }
+            foreach ($lun in $storageDevice.MultipathInfo.Lun) {
+                $scsiLun = $storageDevice.ScsiLun | Where-Object { $_.Key -eq $lun.Lun }
                 $canonicalName = $scsiLun.CanonicalName
                 $datastore = ($vmfsDatastores | Where-Object { ($_.extensiondata.info.vmfs.extent | Select-Object -expand diskname) -like $canonicalName }).name
 
@@ -505,16 +576,18 @@ class ProactivaCollector {
             Show-Progress $hosts.length ($count + 1)
             $h = $hosts[$count]
             $cluster = $this.GetClusterName($h)
-            foreach ($standardSwitch in ($h | Get-VirtualSwitch -Standard)) {
-                foreach ($portGroup in ($standardSwitch | Get-VirtualPortGroup)) {
-                    if ($null -ne $portGroup.vLanId) {
+            # Same data Get-VirtualSwitch -Standard / Get-VirtualPortGroup read, already in ExtensionData
+            $network = $h.ExtensionData.Config.Network
+            foreach ($standardSwitch in $network.Vswitch) {
+                foreach ($portGroup in ($network.Portgroup | Where-Object { $_.Spec.VswitchName -eq $standardSwitch.Name })) {
+                    if ($null -ne $portGroup.Spec.VlanId) {
                         [void]$this.switchReport.Add([PSCustomObject] @{
                             vCenter   = $this.currentVCenter
                             ESXi      = $h.name
                             Cluster   = $cluster
-                            PortGroup = $portGroup.Name
+                            PortGroup = $portGroup.Spec.Name
                             Switch    = $standardSwitch.Name
-                            vLAN      = $portGroup.vLanId
+                            vLAN      = $portGroup.Spec.VlanId
                         })
                     }
                 }
@@ -563,7 +636,7 @@ class ProactivaCollector {
 
     CollectKernelAdapters($hosts) {
         Write-Host "`tProcesando adaptadores VMkernel..." -NoNewline
-        $kernelAdapters = $hosts | Get-VMHostNetworkAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "vmk[0-9]+" }
+        $kernelAdapters = @(Get-KernelAdapters -Hosts $hosts -Server $this.currentVCenter | Where-Object { $_.Name -match "vmk[0-9]+" })
         for ($count = 0; $count -lt $kernelAdapters.length; $count++) {
             Show-Progress $kernelAdapters.length ($count + 1)
             $kernelAdapter = $kernelAdapters[$count]
@@ -720,7 +793,7 @@ class ProactivaCollector {
         $scriptPath = $null
 
         # 1. Target: the first accessible datastore
-        $targetDatastore = Get-Datastore -Server $serverContext | Where-Object { $_.State -eq "Available" } | Select-Object -First 1
+        $targetDatastore = $this.GetDatastores() | Where-Object { $_.State -eq "Available" } | Select-Object -First 1
 
         if (-not $targetDatastore) {
             Write-Warning " -> No hay datastores accesibles."
@@ -1439,6 +1512,193 @@ class ProactivaCollector {
         }
         return $this.toolsReference.($esxi.name)
     }
+}
+
+# VMs of the given hosts read with one Get-View, instead of Get-VM host by host plus
+# Get-NetworkAdapter / Get-CDDrive per VM. Each VM is an object with the properties of Get-VM's
+# that the collector uses (Id, Name, VMHost, PowerState, NumCpu, MemoryMB, MemoryGB,
+# HardwareVersion and ExtensionData, a partial view with only the properties below), plus:
+#   - NetworkAdapters: like Get-NetworkAdapter's (ParentId, Parent, Type, MacAddress, ConnectionState)
+#   - IsoPaths: the IsoPath of every CD drive backed by an ISO (what Get-CDDrive reports)
+#   - HasSnapshots
+# Templates are left out, as Get-VM does. Order: hosts as given, then the VMs of each host.
+function Get-VmInventory {
+    param(
+        [Parameter(Mandatory = $true)] $Server,
+        [Parameter(Mandatory = $true)] [object[]] $Hosts
+    )
+
+    $properties = @(
+        'Name', 'Runtime.Host', 'Runtime.PowerState', 'Runtime.ConnectionState',
+        'Config.Template', 'Config.Hardware.NumCPU', 'Config.Hardware.MemoryMB', 'Config.Hardware.Device',
+        'Config.Version', 'Config.Annotation', 'Config.GuestFullName',
+        'Guest.ToolsStatus', 'Guest.ToolsVersion', 'Guest.GuestFullName', 'Guest.Disk', 'Snapshot'
+    )
+    # PowerCLI's own enum, so PowerState prints as "PoweredOn" and serializes to JSON as a number
+    # exactly like Get-VM's
+    $powerStateType = 'VMware.VimAutomation.ViCore.Types.V1.Inventory.PowerState' -as [type]
+
+    $hostsById = @{}
+    $vmsByHostId = @{}
+    foreach ($h in $Hosts) {
+        $hostsById[$h.Id] = $h
+        $vmsByHostId[$h.Id] = [System.Collections.Generic.List[object]]::new()
+    }
+
+    foreach ($view in (Get-View -ViewType VirtualMachine -Property $properties -Server $Server)) {
+        if ($view.Config.Template -or $null -eq $view.Runtime.Host) { continue }
+        $hostId = "$($view.Runtime.Host.Type)-$($view.Runtime.Host.Value)"
+        if (-not $vmsByHostId.ContainsKey($hostId)) { continue }
+
+        $vmId = "$($view.MoRef.Type)-$($view.MoRef.Value)"
+        $powerStateName = [string]$view.Runtime.PowerState
+        $powerStateName = $powerStateName.Substring(0, 1).ToUpper() + $powerStateName.Substring(1)
+        $memoryMB = [decimal]$view.Config.Hardware.MemoryMB
+
+        $vm = [PSCustomObject]@{
+            Id              = $vmId
+            Name            = $view.Name
+            VMHost          = $hostsById[$hostId]
+            PowerState      = if ($powerStateType) { [enum]::Parse($powerStateType, $powerStateName) } else { $powerStateName }
+            NumCpu          = $view.Config.Hardware.NumCPU
+            MemoryMB        = $memoryMB
+            MemoryGB        = $memoryMB / 1024
+            HardwareVersion = $view.Config.Version
+            ExtensionData   = $view
+            NetworkAdapters = [System.Collections.Generic.List[object]]::new()
+            IsoPaths        = [System.Collections.Generic.List[object]]::new()
+            HasSnapshots    = $null -ne $view.Snapshot
+        }
+
+        foreach ($device in $view.Config.Hardware.Device) {
+            if ($device -is 'VMware.Vim.VirtualEthernetCard') {
+                $vm.NetworkAdapters.Add([PSCustomObject]@{
+                    ParentId        = $vmId
+                    Parent          = $vm
+                    Type            = Get-NetworkAdapterType $device
+                    MacAddress      = $device.MacAddress
+                    ConnectionState = [PSCustomObject]@{
+                        Connected      = $device.Connectable.Connected
+                        StartConnected = $device.Connectable.StartConnected
+                    }
+                })
+            }
+            elseif ($device -is 'VMware.Vim.VirtualCdrom' -and $device.Backing -is 'VMware.Vim.VirtualCdromIsoBackingInfo') {
+                $vm.IsoPaths.Add($device.Backing.FileName)
+            }
+        }
+
+        $vmsByHostId[$hostId].Add($vm)
+    }
+
+    foreach ($h in $Hosts) {
+        foreach ($vm in $vmsByHostId[$h.Id]) { $vm }
+    }
+}
+
+# PowerCLI's name for a network card type (NetworkAdapter.Type), from its vSphere device class
+function Get-NetworkAdapterType($device) {
+    switch ($device.GetType().Name) {
+        'VirtualE1000' { return 'e1000' }
+        'VirtualE1000e' { return 'e1000e' }
+        'VirtualPCNet32' { return 'Flexible' }
+        'VirtualVmxnet' { return 'Vmxnet' }
+        'VirtualVmxnet2' { return 'EnhancedVmxnet' }
+        'VirtualVmxnet3' { return 'Vmxnet3' }
+        'VirtualVmxnet3Vrdma' { return 'Vmxnet3Vrdma' }
+        'VirtualSriovEthernetCard' { return 'SriovEthernetCard' }
+    }
+    return 'Unknown'
+}
+
+# Snapshots (Get-Snapshot, which works out SizeMB) of the VMs that have any, grouped VM by VM
+# in the order of $Vms. VMs without snapshots are not asked.
+function Get-VmSnapshots {
+    param(
+        [Parameter(Mandatory = $true)] $Server,
+        [object[]] $Vms
+    )
+
+    $withSnapshots = @($Vms | Where-Object { $_.HasSnapshots })
+    if ($withSnapshots.Count -eq 0) { return }
+
+    $snapshotsByVm = @{}
+    foreach ($snapshot in (Get-VM -Id @($withSnapshots | ForEach-Object { $_.Id }) -Server $Server | Get-Snapshot)) {
+        $vmId = $snapshot.VM.Id
+        if (-not $snapshotsByVm.ContainsKey($vmId)) { $snapshotsByVm[$vmId] = [System.Collections.Generic.List[object]]::new() }
+        $snapshotsByVm[$vmId].Add($snapshot)
+    }
+
+    foreach ($vm in $withSnapshots) {
+        foreach ($snapshot in $snapshotsByVm[$vm.Id]) { $snapshot }
+    }
+}
+
+# VMkernel adapters of the hosts with the fields of Get-VMHostNetworkAdapter that the report
+# uses, read from each host's ExtensionData instead of one query per host:
+#   - Management / vMotion: whether the adapter is selected for that service in
+#     Config.VirtualNicManagerInfo;
+#   - PortGroupName: the standard port group, or the name of the distributed one (one Get-View
+#     of every distributed port group, only if some adapter is on a vDS).
+# Hosts without configuration (disconnected) are skipped, as the cmdlet does.
+function Get-KernelAdapters {
+    param(
+        [Parameter(Mandatory = $true)] [object[]] $Hosts,
+        [Parameter(Mandatory = $true)] $Server
+    )
+
+    $distributedPortGroups = $null
+
+    foreach ($h in $Hosts) {
+        $config = $h.ExtensionData.Config
+        if ($null -eq $config -or $null -eq $config.Network) { continue }
+
+        # Adapter device ("vmk0") -> services it is selected for ("management", "vmotion", ...)
+        $servicesByDevice = @{}
+        foreach ($netConfig in $config.VirtualNicManagerInfo.NetConfig) {
+            foreach ($candidate in $netConfig.CandidateVnic) {
+                if ($netConfig.SelectedVnic -contains $candidate.Key) {
+                    if (-not $servicesByDevice.ContainsKey($candidate.Device)) { $servicesByDevice[$candidate.Device] = [System.Collections.Generic.List[string]]::new() }
+                    $servicesByDevice[$candidate.Device].Add($netConfig.NicType)
+                }
+            }
+        }
+
+        foreach ($vnic in $config.Network.Vnic) {
+            $portGroupName = $vnic.Portgroup
+            if ([string]::IsNullOrEmpty($portGroupName) -and $vnic.Spec.DistributedVirtualPort) {
+                if ($null -eq $distributedPortGroups) {
+                    $distributedPortGroups = @{}
+                    foreach ($portGroup in (Get-View -ViewType DistributedVirtualPortgroup -Property Key, Name -Server $Server)) {
+                        $distributedPortGroups[$portGroup.Key] = $portGroup.Name
+                    }
+                }
+                $portGroupName = $distributedPortGroups[$vnic.Spec.DistributedVirtualPort.PortgroupKey]
+            }
+
+            $services = $servicesByDevice[$vnic.Device]
+            [PSCustomObject]@{
+                VMHost                   = $h
+                Name                     = $vnic.Device
+                IP                       = $vnic.Spec.Ip.IpAddress
+                MTU                      = $vnic.Spec.Mtu
+                PortGroupName            = $portGroupName
+                ManagementTrafficEnabled = [bool]($services -contains 'management')
+                VMotionEnabled           = [bool]($services -contains 'vmotion')
+            }
+        }
+    }
+}
+
+# Advanced settings as a case-insensitive name -> value table, from Get-AdvancedSetting results
+# (Name / Value) or OptionManager.Setting (Key / Value). The first one of each name wins.
+function New-SettingDictionary($settings) {
+    $dictionary = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($setting in $settings) {
+        $name = if ($setting.PSObject.Properties['Name']) { $setting.Name } else { $setting.Key }
+        if ($null -ne $name -and -not $dictionary.ContainsKey($name)) { $dictionary[$name] = $setting.Value }
+    }
+    return $dictionary
 }
 
 # Groups objects in lists by the Id that $getId returns for each one (its only parameter),

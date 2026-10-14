@@ -115,29 +115,13 @@ function Invoke-ProactivaCollection {
         $clusters = @(Measure-CollectionStage $timings 'Clusters' { Get-Cluster -Server $server })
         $vdSwitches = @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $server })
         Measure-CollectionStage $timings 'Ubicacion de los hosts' { $collector.SetHostLocations($clusters) }
+        Measure-CollectionStage $timings 'Lista de datastores' { $collector.SetDatastores((Get-Datastore -Server $server)) }
 
-        # VMs and snapshots host by host (faster than one big query on large inventories)
-        $allVms = [System.Collections.ArrayList]@()
-        $allSnapshots = [System.Collections.ArrayList]@()
-
-        Write-Host "`tRecolectando VMs y snapshots (puede demorar)..."
-        Measure-CollectionStage $timings 'VMs y snapshots' {
-            for ($i = 0; $i -lt $hosts.Count; $i++) {
-                $vmHost = $hosts[$i]
-                Write-Progress -Activity "Recolectando datos de $($vcenter.Name)" -Status "Host $($i+1)/$($hosts.Count): $($vmHost.Name)" -PercentComplete (($i / $hosts.Count) * 100)
-
-                $vmsOnHost = @(Get-VM -Location $vmHost)
-                if ($vmsOnHost) {
-                    [void]$allVms.AddRange($vmsOnHost)
-
-                    $snapshotsOnHost = @(Get-Snapshot -VM $vmsOnHost)
-                    if ($snapshotsOnHost) {
-                        [void]$allSnapshots.AddRange($snapshotsOnHost)
-                    }
-                }
-            }
-            Write-Progress -Activity "Recoleccion completa" -Completed
-        }
+        # Every VM in one query (with its network cards and ISOs); snapshots only of the VMs
+        # that have any
+        Write-Host "`tRecolectando VMs y snapshots..."
+        $allVms = @(Measure-CollectionStage $timings 'VMs' { Get-VmInventory -Server $server -Hosts $hosts })
+        $allSnapshots = @(Measure-CollectionStage $timings 'Snapshots (lectura)' { Get-VmSnapshots -Server $server -Vms $allVms })
         Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $($allVms.Count) VMs, $($vdSwitches.Count) vDS."
 
         Write-Host "`tProcesando reportes..."
