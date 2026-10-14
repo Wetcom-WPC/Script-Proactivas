@@ -68,16 +68,17 @@ function Test-EsxiEndOfSupport($Context) {
 # Hosts whose support could not be decided ("Sin datos": model in the HCL but CPU family not
 # matched, or unknown release) are not findings; the detail mentions them for manual review.
 #
-# Nutanix hosts are validated against Nutanix's own compatibility matrix, not Broadcom's HCL.
-# When the environment has any, the whole task becomes manual: Estado is left blank for the
-# client's responsible to fill in, and the detail carries what the automatic part found.
+# Nutanix hosts are validated against Nutanix's own compatibility matrix, not Broadcom's HCL:
+# they are taken out of TR-02 and get an extra manual checklist row (see below).
 function Test-HardwareCompatibility($Context) {
     $findings = @()
     $noDataHosts = @()
     $nutanixHosts = @()
+    $totalHosts = 0
 
     foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
         if (-not $row.PSObject.Properties['Supported']) { continue }
+        $totalHosts++
 
         if ($row.Supported.Trim() -eq "Nutanix") {
             $nutanixHosts += $row.Hostname
@@ -104,20 +105,33 @@ function Test-HardwareCompatibility($Context) {
         Export-AnnexSheet -Data $findings -Path $Context.AnnexPath -WorksheetName "Compatibilidad de Componentes"
     }
 
-    if ($nutanixHosts.Count -gt 0) {
-        $autoResult = if ($findings.Count -gt 0) { "$($findings.Count) hosts no soportados segun la HCL de Broadcom (ver anexo)" } else { "el resto de los hosts es compatible segun la HCL de Broadcom" }
-        return [PSCustomObject]@{
-            ID        = "VSP-TR-02"
-            Resultado = $null
-            Detalle   = "Tarea manual a cargo del responsable del cliente: hay $($nutanixHosts.Count) hosts Nutanix, que se validan contra la Nutanix Compatibility & Interoperability Matrix (version de AOS vs ESXi), no contra la HCL de Broadcom. Hosts Nutanix: $($nutanixHosts -join ', '). Resto del entorno: $autoResult.$noDataNote"
-        }
-    }
+    # Nutanix hosts get their own checklist row (VSP-TR-02-NX, created right below TR-02): they
+    # are validated against Nutanix's compatibility matrix by the client's responsible, not
+    # against Broadcom's HCL. TR-02 itself only covers the other hosts.
+    $nutanixNote = if ($nutanixHosts.Count -gt 0) { " Los $($nutanixHosts.Count) hosts Nutanix se validan aparte (fila VSP-TR-02-NX)." } else { "" }
 
     if ($findings.Count -gt 0) {
-        return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) componentes no soportados por la version de ESXi actual.$noDataNote" }
+        $result = [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) componentes no soportados por la version de ESXi actual.$noDataNote$nutanixNote" }
+    }
+    elseif ($nutanixHosts.Count -gt 0 -and $noDataHosts.Count -eq 0 -and $totalHosts -eq $nutanixHosts.Count) {
+        # Every host is Nutanix: nothing left for the HCL to evaluate
+        $result = [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = $null; Detalle = "Todos los hosts del entorno son Nutanix: no hay hosts para validar contra la HCL de Broadcom.$nutanixNote" }
+    }
+    else {
+        $result = [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "Resultado Esperado"; Detalle = "Todos los componentes analizados son compatibles con su versión de ESXi.$noDataNote$nutanixNote" }
     }
 
-    return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "Resultado Esperado"; Detalle = "Todos los componentes analizados son compatibles con su versión de ESXi.$noDataNote" }
+    if ($nutanixHosts.Count -eq 0) { return $result }
+
+    $nutanixRow = [PSCustomObject]@{
+        ID            = "VSP-TR-02-NX"
+        Resultado     = $null
+        Detalle       = "Tarea manual a cargo del responsable del cliente: validar los $($nutanixHosts.Count) hosts Nutanix contra la Nutanix Compatibility & Interoperability Matrix (version de AOS vs ESXi). Hosts: $($nutanixHosts -join ', ')."
+        InsertAfter   = "VSP-TR-02"
+        Procedimiento = "Manual"
+        Chequeo       = "Verificación de compatibilidad de componentes - hosts Nutanix (a cargo del responsable del cliente)"
+    }
+    return $result, $nutanixRow
 }
 
 function Test-NtpConfiguration($Context) {

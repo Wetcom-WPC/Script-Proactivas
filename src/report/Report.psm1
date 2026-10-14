@@ -93,6 +93,12 @@ function Update-Checklist {
     try {
         $sheet = $package.Workbook.Worksheets["Checklist"]
 
+        # Rows that exist only for this client (e.g. VSP-TR-02-NX) are created first, so the
+        # lookup by ID below finds them like any template row
+        foreach ($result in ($Results | Where-Object { $_.PSObject.Properties['InsertAfter'] })) {
+            Add-ChecklistRow -Sheet $sheet -AfterId $result.InsertAfter -Result $result
+        }
+
         foreach ($result in $Results) {
             $idCell = $sheet.Cells["A:A"] | Where-Object { $_.Text -eq $result.ID }
             if (-not $idCell) {
@@ -108,6 +114,86 @@ function Update-Checklist {
     } finally {
         Close-ExcelPackage $package
     }
+}
+
+# Inserts a row right below the row of $AfterId, copying that row's look and Estado dropdown,
+# and fills ID / Procedimiento / Chequeo from $Result. EPPlus does not move the dropdowns
+# (data validations) when inserting a row, so they are rebuilt shifted by one row.
+function Add-ChecklistRow {
+    param(
+        [Parameter(Mandatory = $true)] $Sheet,
+        [Parameter(Mandatory = $true)] [string] $AfterId,
+        [Parameter(Mandatory = $true)] $Result
+    )
+
+    $afterCell = $Sheet.Cells["A:A"] | Where-Object { $_.Text -eq $AfterId }
+    if (-not $afterCell) {
+        Write-Warning "No se encontro '$AfterId' en la plantilla para insertar la fila '$($Result.ID)'."
+        return
+    }
+    $source = $afterCell.Start.Row
+    $new = $source + 1
+
+    # Dropdowns before the insertion: [address, list formula]
+    $validations = @($Sheet.DataValidations | ForEach-Object {
+        [PSCustomObject]@{ Address = $_.Address.Address; Formula = $_.Formula.ExcelFormula }
+    })
+    $sourceFormula = ($validations | Where-Object {
+        $_.Address -split ' ' | Where-Object { Test-CellInRange -Range $_ -Column 'G' -Row $source }
+    } | Select-Object -First 1).Formula
+
+    $Sheet.DataValidations.Clear()
+    $Sheet.InsertRow($new, 1)
+
+    foreach ($validation in $validations) {
+        $shifted = @($validation.Address -split ' ' | ForEach-Object { Move-RangeForInsertedRow -Range $_ -InsertedRow $new }) -join ' '
+        $list = $Sheet.DataValidations.AddListValidation($shifted)
+        $list.Formula.ExcelFormula = $validation.Formula
+        $list.AllowBlank = $true
+        $list.ShowErrorMessage = $true
+    }
+    if ($sourceFormula) {
+        $list = $Sheet.DataValidations.AddListValidation("G$new")
+        $list.Formula.ExcelFormula = $sourceFormula
+        $list.AllowBlank = $true
+        $list.ShowErrorMessage = $true
+    }
+
+    # Same look as the source row, then its own content
+    $Sheet.Cells["A${source}:I${source}"].Copy($Sheet.Cells["A${new}:I${new}"])
+    $Sheet.Row($new).Height = $Sheet.Row($source).Height
+    $Sheet.Cells["A$new"].Value = $Result.ID
+    $Sheet.Cells["D$new"].Value = $Result.Procedimiento
+    $Sheet.Cells["E$new"].Value = $Result.Chequeo
+    foreach ($column in 'G', 'H', 'I') { $Sheet.Cells["$column$new"].Value = $null }
+}
+
+# Does a validation range such as "G14:G16" or "G18" cover the given cell?
+function Test-CellInRange {
+    param([string] $Range, [string] $Column, [int] $Row)
+
+    if ($Range -notmatch '^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$') { return $false }
+    $firstColumn = $matches[1]; $firstRow = [int]$matches[2]
+    $lastColumn = if ($matches[3]) { $matches[3] } else { $firstColumn }
+    $lastRow = if ($matches[4]) { [int]$matches[4] } else { $firstRow }
+    return ($Column -ge $firstColumn -and $Column -le $lastColumn -and $Row -ge $firstRow -and $Row -le $lastRow)
+}
+
+# A validation range after a row was inserted at $InsertedRow: rows at or below it move down
+# one; a range that spans the new row is split around it (the new row gets its own dropdown).
+function Move-RangeForInsertedRow {
+    param([string] $Range, [int] $InsertedRow)
+
+    if ($Range -notmatch '^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$') { return $Range }
+    $firstColumn = $matches[1]; $firstRow = [int]$matches[2]
+    $lastColumn = if ($matches[3]) { $matches[3] } else { $firstColumn }
+    $lastRow = if ($matches[4]) { [int]$matches[4] } else { $firstRow }
+
+    $format = { param($c1, $r1, $c2, $r2) if ($c1 -eq $c2 -and $r1 -eq $r2) { "$c1$r1" } else { "${c1}${r1}:${c2}${r2}" } }
+
+    if ($lastRow -lt $InsertedRow) { return $Range }
+    if ($firstRow -ge $InsertedRow) { return & $format $firstColumn ($firstRow + 1) $lastColumn ($lastRow + 1) }
+    return (& $format $firstColumn $firstRow $lastColumn ($InsertedRow - 1)), (& $format $firstColumn ($InsertedRow + 1) $lastColumn ($lastRow + 1)) -join ' '
 }
 
 # ---------------------------------------------------------------------------------------
