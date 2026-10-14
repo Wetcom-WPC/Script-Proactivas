@@ -352,11 +352,24 @@ function Test-Licenses($Context) {
         }
     }
 
-    # 2. The same license key registered more than once
-    $duplicated = $licenses | Group-Object -Property LicenseKey | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Group }
-    if ($duplicated.Count -gt 0) {
-        $foundDuplicated = $true
-        $findings += $duplicated
+    # 2. The same key in several vCenters (linked vCenters, or one key split between them) is
+    # normal: each vCenter reports its own usage, so it is only a finding when the combined
+    # usage exceeds the key's capacity. The "Product Evaluation" entry every vCenter has
+    # (Evaluation / Unlimited) is never a shared key.
+    $sharedKeys = $licenses |
+        Where-Object { $_.ExpirationDate -ne "Evaluation" } |
+        Group-Object -Property LicenseKey |
+        Where-Object { @($_.Group.vCenter | Select-Object -Unique).Count -gt 1 }
+
+    foreach ($key in $sharedKeys) {
+        $capacity = 0
+        if (-not [int]::TryParse([string]$key.Group[0].Total, [ref]$capacity)) { continue }   # "Unlimited"
+
+        $combinedUse = ($key.Group | ForEach-Object { $used = 0; [void][int]::TryParse([string]$_.Used, [ref]$used); $used } | Measure-Object -Sum).Sum
+        if ($combinedUse -gt $capacity) {
+            $foundDuplicated = $true
+            $findings += $key.Group
+        }
     }
 
     # Only values from the checklist dropdown: Resultado Esperado / Vencimiento < 1 Año /
@@ -377,7 +390,7 @@ function Test-Licenses($Context) {
         $detail = "Se encontraron licencias cuyo uso excede el límite total. Ver anexo."
     } elseif ($foundDuplicated) {
         $result = "Excepción"
-        $detail = "Se encontraron License Keys duplicadas. Ver anexo."
+        $detail = "Se encontraron License Keys usadas en varios vCenters cuyo uso combinado excede el total. Ver anexo."
     }
 
     if ($findings.Count -gt 0) {

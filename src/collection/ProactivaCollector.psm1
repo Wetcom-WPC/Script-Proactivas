@@ -600,7 +600,7 @@ class ProactivaCollector {
         Write-Host "`tProcesando vDS (y backup de configuracion)..." -NoNewline
 
         $backupFolder = Join-Path -Path $this.RunFolder -ChildPath "vds_configuration"
-        if (-not (Test-Path $backupFolder)) {
+        if ($vdSwitches -and -not (Test-Path $backupFolder)) {
             try {
                 New-Item -ItemType Directory -Path $backupFolder -Force | Out-Null
             }
@@ -961,6 +961,10 @@ class ProactivaCollector {
         $vcenterName = $this.currentConnection.Name
         $vcenterShortName = ($vcenterName).Split('.')[0]
         $vcenterVm = $allVms | Where-Object { $_.Name -eq $vcenterName -or $_.Name -eq $vcenterShortName } | Select-Object -First 1
+        if (-not $vcenterVm) {
+            # VM named differently from the vCenter (e.g. "CBVCENTER8"): same fallback as the sizing
+            $vcenterVm = $allVms | Where-Object { $_.ExtensionData.Config.Annotation -in $this.vcsaAnnotations -and $_.Name -match [regex]::Escape($vcenterShortName) } | Select-Object -First 1
+        }
         $vmName = if ($vcenterVm) { $vcenterVm.Name } else { "No Encontrada (Físico/Otro)" }
 
         # 2. Root password expiration (appliance API through CIS)

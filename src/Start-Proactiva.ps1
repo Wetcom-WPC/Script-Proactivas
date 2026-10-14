@@ -191,7 +191,7 @@ try {
     Write-Host " Proceso completado" -ForegroundColor Green
     if ($report.AnnexPath) { Write-Host " Anexo:     $($report.AnnexPath)" -ForegroundColor Green }
     Write-Host " Checklist: $($report.ChecklistPath)" -ForegroundColor Green
-    if ($Frequency -eq 'Semiannual' -and (Test-Path (Join-Path $runPath 'vds_configuration'))) {
+    if ($Frequency -eq 'Semiannual' -and (Get-ChildItem (Join-Path $runPath 'vds_configuration') -Filter '*.zip' -ErrorAction SilentlyContinue)) {
         Write-Host " Recuerde subir al Drive los .zip de: $(Join-Path $runPath 'vds_configuration')" -ForegroundColor Yellow
     }
     Write-Host "==========================================================" -ForegroundColor Green
