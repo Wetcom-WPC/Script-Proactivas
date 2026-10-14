@@ -148,6 +148,9 @@ try {
         }
         Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
 
+        # Background work (HCL download, parallel collection). Without it everything runs in sequence.
+        Import-Module (Join-Path $runtimeModules 'ThreadJob') -ErrorAction SilentlyContinue
+
         Import-Module (Join-Path $PSScriptRoot 'collection\Collection.psm1') -Force -WarningAction SilentlyContinue
 
         $credentials = $null

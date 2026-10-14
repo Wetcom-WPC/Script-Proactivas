@@ -101,6 +101,9 @@ function Invoke-ProactivaCollection {
 
     $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
 
+    # The server HCL (TR-02) downloads in the background while the inventory is read
+    Start-ServerHclDownload
+
     foreach ($vcenter in $VCenters) {
         $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
         $server = $vcenter.Connection
@@ -111,8 +114,7 @@ function Invoke-ProactivaCollection {
         $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $server })
         $clusters = @(Measure-CollectionStage $timings 'Clusters' { Get-Cluster -Server $server })
         $vdSwitches = @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $server })
-        $vmCount = Measure-CollectionStage $timings 'Conteo de VMs' { @(Get-VM -Server $server).Count }
-        Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $vmCount VMs, $($vdSwitches.Count) vDS."
+        Measure-CollectionStage $timings 'Ubicacion de los hosts' { $collector.SetHostLocations($clusters) }
 
         # VMs and snapshots host by host (faster than one big query on large inventories)
         $allVms = [System.Collections.ArrayList]@()
@@ -136,6 +138,7 @@ function Invoke-ProactivaCollection {
             }
             Write-Progress -Activity "Recoleccion completa" -Completed
         }
+        Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $($allVms.Count) VMs, $($vdSwitches.Count) vDS."
 
         Write-Host "`tProcesando reportes..."
         Measure-CollectionStage $timings 'Prueba de alarmas' { $collector.CollectAlarmTest([bool]$SkipAlarmTest) }
