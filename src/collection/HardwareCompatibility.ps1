@@ -149,6 +149,7 @@ function Test-HostHcl {
         Build             = $VMHost.Build
         ReleaseLevel      = Resolve-HostRelease -VMHost $VMHost -EsxiReleases $HclData.EsxiReleases
         Manufacturer      = $VMHost.Manufacturer
+        IsNutanix         = ([string]$VMHost.Manufacturer -match 'Nutanix')
         Model             = $hostModel
         Cpu               = $hostCpu
         Supported         = $null

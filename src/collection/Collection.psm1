@@ -24,6 +24,7 @@ function Connect-VCenters {
     foreach ($server in $Servers) {
         $connection = $null
         $usedCredential = $null
+        $lastError = $null
 
         if ($keychain.Count -gt 0) {
             Write-Host "`nProbando credenciales guardadas en '$server'..." -ForegroundColor Cyan
@@ -32,7 +33,7 @@ function Connect-VCenters {
                     $connection = Connect-VIServer -Server $server -Credential $credential -ErrorAction Stop
                     $usedCredential = $credential
                     break
-                } catch {}
+                } catch { $lastError = $_.Exception.Message }
             }
         }
 
@@ -54,7 +55,7 @@ function Connect-VCenters {
         }
 
         if (-not $connection) {
-            Write-Warning "-> No se pudo conectar a '$server'. Se omite."
+            Write-Warning "-> No se pudo conectar a '$server'. Se omite.$(if ($lastError) { " Ultimo error: $lastError" })"
             continue
         }
         Write-Host "-> Conexion con '$server' exitosa." -ForegroundColor Green

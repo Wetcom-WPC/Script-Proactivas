@@ -195,9 +195,12 @@ class ProactivaCollector {
                 PowerManagement             = $h.ExtensionData.Hardware.CpuPowerManagementInfo.CurrentPolicy
                 SyslogGlobalLogDir          = $syslogLogDir
                 SyslogGlobalLogHost         = $syslogLogHost
-                Supported                   = if ($null -eq $hclResult.Supported) { "Sin datos" } elseif ($hclResult.Supported) { "True" } else { "False" }
+                # Nutanix hosts: ESXi is managed through Nutanix (AOS/LCM) and what is supported is
+                # defined by Nutanix's own compatibility matrix, so the Broadcom HCL result is
+                # kept only as reference and the check is left to the client's responsible
+                Supported                   = if ($hclResult.IsNutanix) { "Nutanix" } elseif ($null -eq $hclResult.Supported) { "Sin datos" } elseif ($hclResult.Supported) { "True" } else { "False" }
                 "Supported Releases"        = $hclResult.SupportedReleases -join ","
-                Note                        = $hclResult.Note
+                Note                        = if ($hclResult.IsNutanix) { "Host Nutanix: validacion manual contra la Nutanix Compatibility & Interoperability Matrix. Referencia Broadcom: $($hclResult.Note)" } else { $hclResult.Note }
                 Reference                   = $hclResult.Reference
             }
         }

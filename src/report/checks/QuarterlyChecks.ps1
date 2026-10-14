@@ -67,14 +67,22 @@ function Test-EsxiEndOfSupport($Context) {
 # Server hardware support for the host's ESXi release (HCL lookup done during collection).
 # Hosts whose support could not be decided ("Sin datos": model in the HCL but CPU family not
 # matched, or unknown release) are not findings; the detail mentions them for manual review.
+#
+# Nutanix hosts are validated against Nutanix's own compatibility matrix, not Broadcom's HCL.
+# When the environment has any, the whole task becomes manual: Estado is left blank for the
+# client's responsible to fill in, and the detail carries what the automatic part found.
 function Test-HardwareCompatibility($Context) {
     $findings = @()
     $noDataHosts = @()
+    $nutanixHosts = @()
 
     foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
         if (-not $row.PSObject.Properties['Supported']) { continue }
 
-        if ($row.Supported.Trim() -eq "Sin datos") {
+        if ($row.Supported.Trim() -eq "Nutanix") {
+            $nutanixHosts += $row.Hostname
+        }
+        elseif ($row.Supported.Trim() -eq "Sin datos") {
             $noDataHosts += $row.Hostname
         }
         elseif ($row.Supported.Trim() -eq "False") {
@@ -94,6 +102,18 @@ function Test-HardwareCompatibility($Context) {
 
     if ($findings.Count -gt 0) {
         Export-AnnexSheet -Data $findings -Path $Context.AnnexPath -WorksheetName "Compatibilidad de Componentes"
+    }
+
+    if ($nutanixHosts.Count -gt 0) {
+        $autoResult = if ($findings.Count -gt 0) { "$($findings.Count) hosts no soportados segun la HCL de Broadcom (ver anexo)" } else { "el resto de los hosts es compatible segun la HCL de Broadcom" }
+        return [PSCustomObject]@{
+            ID        = "VSP-TR-02"
+            Resultado = $null
+            Detalle   = "Tarea manual a cargo del responsable del cliente: hay $($nutanixHosts.Count) hosts Nutanix, que se validan contra la Nutanix Compatibility & Interoperability Matrix (version de AOS vs ESXi), no contra la HCL de Broadcom. Hosts Nutanix: $($nutanixHosts -join ', '). Resto del entorno: $autoResult.$noDataNote"
+        }
+    }
+
+    if ($findings.Count -gt 0) {
         return [PSCustomObject]@{ ID = "VSP-TR-02"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) componentes no soportados por la version de ESXi actual.$noDataNote" }
     }
 
