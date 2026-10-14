@@ -24,6 +24,10 @@ those are the only credentials tried and nothing is prompted. Meant for unattend
 Skips collection and conversion and regenerates the annex/checklist from an existing run
 (-RunFolder, or the most recent one). Useful to fix a typo in the client or month.
 
+.PARAMETER Sequential
+Collects everything in sequence. By default several vCenters, and the drivers of many hosts,
+are collected in parallel (thread jobs). Useful to debug or to compare results.
+
 .PARAMETER SkipAlarmTest
 Does not create the temporary "Falso Positivo" alarm in the vCenter (the only change the
 collection makes to the environment). The rest of the alarm audit still runs.
@@ -41,7 +45,8 @@ param(
     [string] $CredentialPath,
     [switch] $ReportOnly,
     [string] $RunFolder,
-    [switch] $SkipAlarmTest
+    [switch] $SkipAlarmTest,
+    [switch] $Sequential
 )
 
 $ErrorActionPreference = 'Continue'
@@ -163,9 +168,9 @@ try {
         if ($connectedVCenters.Count -eq 0) { throw "No se pudo conectar a ningun vCenter." }
 
         $jsonFiles = @()
-        $jsonFiles += Invoke-ProactivaCollection -VCenters $connectedVCenters -RunFolder $runPath -SkipAlarmTest:$SkipAlarmTest
+        $jsonFiles += Invoke-ProactivaCollection -VCenters $connectedVCenters -RunFolder $runPath -SkipAlarmTest:$SkipAlarmTest -Sequential:$Sequential
         if ($Frequency -ne 'Monthly') {
-            $jsonFiles += Invoke-DriverCollection -VCenters $connectedVCenters -RunFolder $runPath
+            $jsonFiles += Invoke-DriverCollection -VCenters $connectedVCenters -RunFolder $runPath -Sequential:$Sequential
         }
 
         Disconnect-VCenters -VCenters $connectedVCenters

@@ -77,6 +77,13 @@ function Start-ServerHclDownload {
     } -ArgumentList (Join-Path $PSScriptRoot 'HardwareCompatibility.ps1')
 }
 
+# Hands this module the reference data already loaded elsewhere (parallel workers get the one
+# the main process downloaded, instead of downloading it again)
+function Set-HclReferenceData {
+    param([Parameter(Mandatory = $true)] $Data)
+    $script:hclReferenceData = $Data
+}
+
 # Reference data for Test-HostHcl, loaded once per run: the server catalog (online, or the CSV
 # when the guide is not reachable) and the ESXi build list.
 function Get-HclReferenceData {

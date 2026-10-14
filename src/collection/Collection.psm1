@@ -8,7 +8,8 @@ using module .\ProactivaCollector.psm1
 # tried first on the next vCenter, so vCenters that share credentials only ask once.
 # With -Credentials (non-interactive runs) only those are tried and nothing is prompted.
 #
-# Returns one object per connected vCenter: @{ Name; Connection; CisConnection }.
+# Returns one object per connected vCenter: @{ Name; Connection; CisConnection; Credential }.
+# The credential stays in memory only: the parallel workers use it to open their own sessions.
 function Connect-VCenters {
     param(
         [Parameter(Mandatory = $true)] [string[]] $Servers,
@@ -73,6 +74,7 @@ function Connect-VCenters {
             Name          = $connection.Name
             Connection    = $connection
             CisConnection = $cisConnection
+            Credential    = $usedCredential
         }
     }
 
@@ -90,72 +92,181 @@ function Disconnect-VCenters {
     }
 }
 
+# ---------------------------------------------------------------------------------------
+# Proactiva data (every sheet except "ESXi IO")
+# ---------------------------------------------------------------------------------------
+
 # Collects the Proactiva data (every sheet except "ESXi IO") from all vCenters.
+#
+# With more than one vCenter they are collected at the same time, one thread job each (see
+# Invoke-CollectionWorkers); -Sequential, or a missing ThreadJob module, collects them one
+# after the other. A vCenter whose worker fails is collected again here, in sequence.
 # Returns the path of the JSON file written to <RunFolder>\json.
 function Invoke-ProactivaCollection {
     param(
         [Parameter(Mandatory = $true)] [object[]] $VCenters,
         [Parameter(Mandatory = $true)] [string] $RunFolder,
-        [switch] $SkipAlarmTest
+        [switch] $SkipAlarmTest,
+        [switch] $Sequential
     )
 
-    $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
+    $referenceDataFolder = Join-Path $PSScriptRoot 'reference-data'
 
     # The server HCL (TR-02) downloads in the background while the inventory is read
     Start-ServerHclDownload
 
-    foreach ($vcenter in $VCenters) {
-        $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
-        $server = $vcenter.Connection
-        Write-Host "`nProcesando vCenter: $($vcenter.Name)"
-        $timings = [ordered]@{}
+    $reports = @{}
 
-        Write-Host "`tObteniendo objetos principales..."
-        $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $server })
-        $clusters = @(Measure-CollectionStage $timings 'Clusters' { Get-Cluster -Server $server })
-        $vdSwitches = @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $server })
-        Measure-CollectionStage $timings 'Ubicacion de los hosts' { $collector.SetHostLocations($clusters) }
-        Measure-CollectionStage $timings 'Lista de datastores' { $collector.SetDatastores((Get-Datastore -Server $server)) }
+    if (-not $Sequential -and $VCenters.Count -gt 1 -and (Test-ParallelCollection)) {
+        # Every worker needs the HCL, so it is waited for here and handed over once
+        $hclData = Get-HclReferenceData -ReferenceDataFolder $referenceDataFolder
 
-        # Every VM in one query (with its network cards and ISOs); snapshots only of the VMs
-        # that have any
-        Write-Host "`tRecolectando VMs y snapshots..."
-        $allVms = @(Measure-CollectionStage $timings 'VMs' { Get-VmInventory -Server $server -Hosts $hosts })
-        $allSnapshots = @(Measure-CollectionStage $timings 'Snapshots (lectura)' { Get-VmSnapshots -Server $server -Vms $allVms })
-        Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $($allVms.Count) VMs, $($vdSwitches.Count) vDS."
+        Write-Host "`nRecolectando $($VCenters.Count) vCenters en paralelo (el detalle de cada uno se muestra al terminar)..."
+        $tasks = foreach ($vcenter in $VCenters) {
+            [PSCustomObject]@{
+                Label     = $vcenter.Name
+                VCenter   = $vcenter
+                WithCis   = $null -ne $vcenter.CisConnection
+                Command   = 'Invoke-VCenterCollectionWorker'
+                Arguments = @{ RunFolder = $RunFolder; SkipAlarmTest = [bool]$SkipAlarmTest; HclData = $hclData }
+            }
+        }
 
-        Write-Host "`tProcesando reportes..."
-        Measure-CollectionStage $timings 'Prueba de alarmas' { $collector.CollectAlarmTest([bool]$SkipAlarmTest) }
-        Measure-CollectionStage $timings 'Sizing del vCenter' { $collector.CollectVCenterSizing($allVms, $hosts) }
-        Measure-CollectionStage $timings 'Backups (VAMI)' { $collector.CollectBackupActivity() }
-        Measure-CollectionStage $timings 'Estadisticas de performance' { $collector.CollectPerformanceHealth($clusters) }
-        Measure-CollectionStage $timings 'Certificados del vCenter' { $collector.CollectCertificates() }
-        Measure-CollectionStage $timings 'ESXi' { $collector.CollectEsxi($hosts) }
-        Measure-CollectionStage $timings 'Informacion del vCenter' { $collector.CollectVCenterInfo($allVms) }
-        Measure-CollectionStage $timings 'VMs y placas de red' { $collector.CollectVms($allVms, $clusters, $allSnapshots) }
-        Measure-CollectionStage $timings 'Datastores' { $collector.CollectDatastores($hosts) }
-        Measure-CollectionStage $timings 'Standard switches' { $collector.CollectStandardSwitches($hosts) }
-        Measure-CollectionStage $timings 'Adaptadores VMkernel' { $collector.CollectKernelAdapters($hosts) }
-        Measure-CollectionStage $timings 'Snapshots' { $collector.CollectSnapshots($allSnapshots) }
-        Measure-CollectionStage $timings 'Particiones' { $collector.CollectPartitions($allVms) }
-        Measure-CollectionStage $timings 'vDS' { $collector.CollectDistributedSwitches($vdSwitches) }
-        Measure-CollectionStage $timings 'Licencias' { $collector.CollectLicenses() }
-
-        Write-StageTimings -Title "recoleccion de $($vcenter.Name)" -Timings $timings
+        $results = @(Invoke-CollectionWorkers -Tasks $tasks -ThrottleLimit 4)
+        for ($i = 0; $i -lt $VCenters.Count; $i++) {
+            if ($results[$i].Ok -and $results[$i].Result) { $reports[$i] = $results[$i].Result }
+            else { Write-Warning "La recoleccion en paralelo de '$($VCenters[$i].Name)' fallo ($($results[$i].Error)). Se recolecta de nuevo, en secuencia." }
+        }
     }
 
-    return Save-CollectionJson -Name "Proactiva" -Report $collector.GetReport() -VCenters $VCenters -RunFolder $RunFolder
+    for ($i = 0; $i -lt $VCenters.Count; $i++) {
+        if ($reports.ContainsKey($i)) { continue }
+        $collector = [ProactivaCollector]::new($referenceDataFolder, $RunFolder)
+        $collector.SetCurrentVCenter($VCenters[$i].Connection, $VCenters[$i].CisConnection)
+        Invoke-VCenterCollection -Collector $collector -Server $VCenters[$i].Connection -SkipAlarmTest:$SkipAlarmTest | Out-Null
+        $reports[$i] = $collector.GetReport()
+    }
+
+    $report = Merge-CollectionReports -Reports @(0..($VCenters.Count - 1) | ForEach-Object { $reports[$_] })
+    return Save-CollectionJson -Name "Proactiva" -Report $report -VCenters $VCenters -RunFolder $RunFolder
 }
 
+# Collects one vCenter into $Collector (already pointed at it with SetCurrentVCenter) and
+# prints how long each stage took.
+function Invoke-VCenterCollection {
+    param(
+        [Parameter(Mandatory = $true)] $Collector,
+        [Parameter(Mandatory = $true)] $Server,
+        [switch] $SkipAlarmTest
+    )
+
+    Write-Host "`nProcesando vCenter: $($Collector.currentVCenter)"
+    $timings = [ordered]@{}
+
+    Write-Host "`tObteniendo objetos principales..."
+    $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $Server })
+    $clusters = @(Measure-CollectionStage $timings 'Clusters' { Get-Cluster -Server $Server })
+    $vdSwitches = @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $Server })
+    Measure-CollectionStage $timings 'Ubicacion de los hosts' { $Collector.SetHostLocations($clusters) }
+    Measure-CollectionStage $timings 'Lista de datastores' { $Collector.SetDatastores((Get-Datastore -Server $Server)) }
+
+    # Every VM in one query (with its network cards and ISOs); snapshots only of the VMs
+    # that have any
+    Write-Host "`tRecolectando VMs y snapshots..."
+    $allVms = @(Measure-CollectionStage $timings 'VMs' { Get-VmInventory -Server $Server -Hosts $hosts })
+    $allSnapshots = @(Measure-CollectionStage $timings 'Snapshots (lectura)' { Get-VmSnapshots -Server $Server -Vms $allVms })
+    Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $($allVms.Count) VMs, $($vdSwitches.Count) vDS."
+
+    Write-Host "`tProcesando reportes..."
+    Measure-CollectionStage $timings 'Prueba de alarmas' { $Collector.CollectAlarmTest([bool]$SkipAlarmTest) }
+    Measure-CollectionStage $timings 'Sizing del vCenter' { $Collector.CollectVCenterSizing($allVms, $hosts) }
+    Measure-CollectionStage $timings 'Backups (VAMI)' { $Collector.CollectBackupActivity() }
+    Measure-CollectionStage $timings 'Estadisticas de performance' { $Collector.CollectPerformanceHealth($clusters) }
+    Measure-CollectionStage $timings 'Certificados del vCenter' { $Collector.CollectCertificates() }
+    Measure-CollectionStage $timings 'ESXi' { $Collector.CollectEsxi($hosts) }
+    Measure-CollectionStage $timings 'Informacion del vCenter' { $Collector.CollectVCenterInfo($allVms) }
+    Measure-CollectionStage $timings 'VMs y placas de red' { $Collector.CollectVms($allVms, $clusters, $allSnapshots) }
+    Measure-CollectionStage $timings 'Datastores' { $Collector.CollectDatastores($hosts) }
+    Measure-CollectionStage $timings 'Standard switches' { $Collector.CollectStandardSwitches($hosts) }
+    Measure-CollectionStage $timings 'Adaptadores VMkernel' { $Collector.CollectKernelAdapters($hosts) }
+    Measure-CollectionStage $timings 'Snapshots' { $Collector.CollectSnapshots($allSnapshots) }
+    Measure-CollectionStage $timings 'Particiones' { $Collector.CollectPartitions($allVms) }
+    Measure-CollectionStage $timings 'vDS' { $Collector.CollectDistributedSwitches($vdSwitches) }
+    Measure-CollectionStage $timings 'Licencias' { $Collector.CollectLicenses() }
+
+    Write-StageTimings -Title "recoleccion de $($Collector.currentVCenter)" -Timings $timings
+}
+
+# Worker side of Invoke-ProactivaCollection: collects one vCenter with the worker's own
+# connection and returns its report.
+function Invoke-VCenterCollectionWorker {
+    param(
+        [Parameter(Mandatory = $true)] $Connection,
+        $CisConnection,
+        [Parameter(Mandatory = $true)] [string] $RunFolder,
+        [bool] $SkipAlarmTest,
+        $HclData
+    )
+
+    if ($HclData) { Set-HclReferenceData -Data $HclData }
+
+    $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
+    $collector.SetCurrentVCenter($Connection, $CisConnection)
+    Invoke-VCenterCollection -Collector $collector -Server $Connection -SkipAlarmTest:$SkipAlarmTest | Out-Null
+    return $collector.GetReport()
+}
+
+# Joins the reports of several vCenters, sheet by sheet, in the order given. Keeps the rule
+# CollectDatastores applies within a vCenter: a vSAN datastore whose name was already listed
+# (by an earlier vCenter) is listed only once.
+function Merge-CollectionReports {
+    param([Parameter(Mandatory = $true)] [object[]] $Reports)
+
+    if ($Reports.Count -eq 1) { return $Reports[0] }
+
+    $sheetNames = @($Reports[0].PSObject.Properties.Name)
+    $merged = [ordered]@{}
+    foreach ($name in $sheetNames) { $merged[$name] = [System.Collections.ArrayList]@() }
+
+    $listedDatastores = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($report in $Reports) {
+        foreach ($name in $sheetNames) {
+            $rows = @($report.$name)
+            if ($name -eq 'Datastores') {
+                $rows = @($rows | Where-Object { -not ($_.Policy -eq 'vSAN' -and $listedDatastores.Contains([string]$_.Datastore)) })
+                foreach ($row in $rows) {
+                    foreach ($datastoreName in @($row.Datastore)) {
+                        if ($null -ne $datastoreName) { [void]$listedDatastores.Add([string]$datastoreName) }
+                    }
+                }
+            }
+            foreach ($row in $rows) { [void]$merged[$name].Add($row) }
+        }
+    }
+    return [PSCustomObject]$merged
+}
+
+# ---------------------------------------------------------------------------------------
+# Host drivers ("ESXi IO" sheet)
+# ---------------------------------------------------------------------------------------
+
 # Collects host drivers/firmware ("ESXi IO" sheet) from all vCenters. Quarterly and semiannual
-# visits only. Returns the path of the JSON file written to <RunFolder>\json.
+# visits only.
+#
+# esxcli through vCenter is slow and each host is independent, so the hosts of a vCenter are
+# split among several thread jobs (unless -Sequential, or there are only a few hosts). Hosts
+# whose worker fails are collected here, in sequence. Rows keep the order of the hosts.
+# Returns the path of the JSON file written to <RunFolder>\json.
 function Invoke-DriverCollection {
     param(
         [Parameter(Mandatory = $true)] [object[]] $VCenters,
-        [Parameter(Mandatory = $true)] [string] $RunFolder
+        [Parameter(Mandatory = $true)] [string] $RunFolder,
+        [switch] $Sequential
     )
 
     $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
+    $maxWorkers = 6
+    $minHostsForParallel = 6
 
     foreach ($vcenter in $VCenters) {
         $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
@@ -165,12 +276,259 @@ function Invoke-DriverCollection {
         $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $vcenter.Connection })
         Write-Host "`t$($hosts.Count) hosts encontrados"
 
-        Measure-CollectionStage $timings 'Drivers y firmware' { $collector.CollectHostDrivers($hosts) }
+        $reachableHosts = @($hosts | Where-Object { @("Connected", "Maintenance") -contains $_.ConnectionState })
+        if ($Sequential -or $reachableHosts.Count -lt $minHostsForParallel -or -not (Test-ParallelCollection)) {
+            Measure-CollectionStage $timings 'Drivers y firmware' { $collector.CollectHostDrivers($hosts) }
+        }
+        else {
+            Measure-CollectionStage $timings 'Drivers y firmware (en paralelo)' {
+                # Indexes built once here and shared (read-only) with every worker
+                $ioIndex = $collector.GetIoHclIndex()
+                $vsanIndex = $collector.GetVsanHclIndex()
+
+                $workerCount = [math]::Min($maxWorkers, [math]::Ceiling($reachableHosts.Count / 2))
+                Write-Host "`tProcesando drivers de $($reachableHosts.Count) hosts en $workerCount tareas en paralelo..."
+
+                $tasks = for ($w = 0; $w -lt $workerCount; $w++) {
+                    $hostIds = @(for ($i = $w; $i -lt $reachableHosts.Count; $i += $workerCount) { $reachableHosts[$i].Id })
+                    [PSCustomObject]@{
+                        Label     = "$($vcenter.Name) (tarea $($w + 1) de $workerCount)"
+                        VCenter   = $vcenter
+                        WithCis   = $false
+                        Command   = 'Invoke-HostDriversWorker'
+                        Arguments = @{ RunFolder = $RunFolder; HostIds = $hostIds; IoHclIndex = $ioIndex; VsanHclIndex = $vsanIndex }
+                        HostIds   = $hostIds
+                    }
+                }
+                $results = @(Invoke-CollectionWorkers -Tasks $tasks -ThrottleLimit $workerCount)
+
+                # Rows by host; hosts of a failed worker are collected here
+                $rowsByHost = @{}
+                $failedHostIds = [System.Collections.Generic.List[string]]::new()
+                for ($i = 0; $i -lt $tasks.Count; $i++) {
+                    if ($results[$i].Ok) {
+                        foreach ($row in $results[$i].Result.Rows) {
+                            if (-not $rowsByHost.ContainsKey($row.Hostname)) { $rowsByHost[$row.Hostname] = [System.Collections.Generic.List[object]]::new() }
+                            $rowsByHost[$row.Hostname].Add($row)
+                        }
+                    }
+                    else {
+                        Write-Warning "Una tarea de drivers fallo ($($results[$i].Error)). Sus hosts se procesan de nuevo, en secuencia."
+                        $failedHostIds.AddRange([string[]]$tasks[$i].HostIds)
+                    }
+                }
+
+                if ($failedHostIds.Count -gt 0) {
+                    $fallback = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
+                    $fallback.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
+                    $fallback.ioHclIndex = $ioIndex
+                    $fallback.vsanHclIndex = $vsanIndex
+                    $fallback.CollectHostDrivers(@($reachableHosts | Where-Object { $failedHostIds -contains $_.Id }))
+                    foreach ($row in $fallback.nicReport) {
+                        if (-not $rowsByHost.ContainsKey($row.Hostname)) { $rowsByHost[$row.Hostname] = [System.Collections.Generic.List[object]]::new() }
+                        $rowsByHost[$row.Hostname].Add($row)
+                    }
+                }
+
+                foreach ($h in $reachableHosts) {
+                    foreach ($row in $rowsByHost[$h.Name]) { [void]$collector.nicReport.Add($row) }
+                }
+            }
+        }
         Write-StageTimings -Title "drivers de $($vcenter.Name)" -Timings $timings
     }
 
     return Save-CollectionJson -Name "DriverInfo" -Report $collector.GetReport() -VCenters $VCenters -RunFolder $RunFolder
 }
+
+# Worker side of Invoke-DriverCollection: drivers of some hosts of one vCenter, with the
+# worker's own connection. Returns @{ Rows } in the order of $HostIds.
+function Invoke-HostDriversWorker {
+    param(
+        [Parameter(Mandatory = $true)] $Connection,
+        $CisConnection,
+        [Parameter(Mandatory = $true)] [string] $RunFolder,
+        [Parameter(Mandatory = $true)] [string[]] $HostIds,
+        [hashtable] $IoHclIndex,
+        [hashtable] $VsanHclIndex
+    )
+
+    $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
+    $collector.SetCurrentVCenter($Connection, $CisConnection)
+    if ($IoHclIndex) { $collector.ioHclIndex = $IoHclIndex }
+    if ($VsanHclIndex) { $collector.vsanHclIndex = $VsanHclIndex }
+
+    $hostsById = @{}
+    foreach ($h in (Get-VMHost -Id $HostIds -Server $Connection)) { $hostsById[$h.Id] = $h }
+    $collector.CollectHostDrivers(@($HostIds | ForEach-Object { $hostsById[$_] } | Where-Object { $_ }))
+
+    return [PSCustomObject]@{ Rows = $collector.nicReport }
+}
+
+# ---------------------------------------------------------------------------------------
+# Parallel workers
+# ---------------------------------------------------------------------------------------
+
+# Whether collection can run in thread jobs (the bundled runtime includes ThreadJob)
+function Test-ParallelCollection {
+    return [bool](Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+}
+
+# Session secret of a PowerCLI connection (SessionSecret in current PowerCLI, SessionId before)
+function Get-SessionSecret($connection) {
+    if ($null -eq $connection) { return $null }
+    if ($connection.PSObject.Properties['SessionSecret']) { return $connection.SessionSecret }
+    return $connection.SessionId
+}
+
+# Runs each task in its own thread job and returns one result per task, in the same order:
+# @{ Ok; Result; Error }. A task is @{ Label; VCenter; WithCis; Command; Arguments }: the
+# worker imports PowerCLI and this module, opens its OWN session to the vCenter with the
+# credential that worked in Connect-VCenters (SOAP, and CIS when WithCis), runs
+# "<Command> -Connection -CisConnection @Arguments" and disconnects that session. If PowerCLI
+# ever hands the worker the main session instead of a new one, it is not disconnected.
+#
+# The console output of each worker (Write-Host, warnings) is shown when it finishes, in task
+# order, so the log stays readable.
+function Invoke-CollectionWorkers {
+    param(
+        [Parameter(Mandatory = $true)] [object[]] $Tasks,
+        [int] $ThrottleLimit = 4,
+        # Longest a worker may take (counted from when its turn to be waited for comes)
+        [int] $TimeoutSeconds = 3 * 60 * 60,
+        # Where the workers load PowerCLI from: the bundled runtime (tests point it at stubs)
+        [string] $ModulesFolder = (Join-Path $PSScriptRoot '..\..\runtime\Modules')
+    )
+
+    $modulesFolder = (Resolve-Path $ModulesFolder).Path
+    $collectionModule = Join-Path $PSScriptRoot 'Collection.psm1'
+
+    $worker = {
+        param($ModulesFolder, $CollectionModule, $Server, $Credential, $MainSession, $WithCis, $Command, $Arguments, $StartupLock)
+
+        $ErrorActionPreference = 'Continue'
+        $connection = $null
+        $cisConnection = $null
+        # Everything the work writes (Write-Host, warnings, errors), in order, for the main
+        # process to show: Receive-Job does not replay Write-Host from thread jobs
+        $log = [System.Collections.Generic.List[object]]::new()
+        $lockTaken = $false
+        try {
+            # Loading and initializing PowerCLI in several runspaces at once collides ("Collection
+            # was modified"), so the workers take turns until they are connected; the work itself
+            # runs in parallel.
+            $lockTaken = $StartupLock.Wait([TimeSpan]::FromMinutes(10))
+            if (-not $lockTaken) { throw "Tiempo agotado esperando el turno para cargar PowerCLI." }
+
+            # PowerCLI complains that its vi:/vmstore: drives are already mounted (by the main
+            # runspace) but loads fine, so import errors are silenced (the module's own nested
+            # imports only follow the preference variable) and the load is checked by its commands.
+            $ErrorActionPreference = 'SilentlyContinue'
+            foreach ($module in 'VMware.VimAutomation.Sdk', 'VMware.VimAutomation.Common', 'VMware.VimAutomation.Cis.Core', 'VMware.VimAutomation.Core', 'VMware.VimAutomation.Vds') {
+                Import-Module (Join-Path $ModulesFolder $module) -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            }
+            $ErrorActionPreference = 'Continue'
+            $missing = @('Connect-VIServer', 'Connect-CisServer', 'Get-VDSwitch' | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+            if ($missing.Count -gt 0) { throw "No se pudo cargar PowerCLI en la tarea en paralelo (faltan: $($missing -join ', '))." }
+
+            Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
+            Import-Module $CollectionModule -ErrorAction Stop -WarningAction SilentlyContinue
+
+            $connection = Connect-VIServer -Server $Server -Credential $Credential -ErrorAction Stop
+            if ($WithCis) {
+                try { $cisConnection = Connect-CisServer -Server $Server -Credential $Credential -ErrorAction Stop }
+                catch { $log.Add("WARNING: `t-> La conexion CIS (REST) fallo: $($_.Exception.Message)") }
+            }
+            [void]$StartupLock.Release()
+            $lockTaken = $false
+
+            $result = foreach ($item in (& $Command -Connection $connection -CisConnection $cisConnection @Arguments *>&1)) {
+                if ($item -is [System.Management.Automation.InformationRecord] -or $item -is [System.Management.Automation.WarningRecord] -or
+                    $item -is [System.Management.Automation.ErrorRecord] -or $item -is [System.Management.Automation.VerboseRecord] -or
+                    $item -is [System.Management.Automation.DebugRecord]) {
+                    $log.Add($item)
+                }
+                else { $item }
+            }
+            [PSCustomObject]@{ Ok = $true; Result = $result; Error = $null; Log = $log }
+        }
+        catch {
+            [PSCustomObject]@{ Ok = $false; Result = $null; Error = $_.Exception.Message; Log = $log }
+        }
+        finally {
+            if ($lockTaken) { [void]$StartupLock.Release() }
+            if ($connection) {
+                $secret = if ($connection.PSObject.Properties['SessionSecret']) { $connection.SessionSecret } else { $connection.SessionId }
+                if ($secret -ne $MainSession) { Disconnect-VIServer -Server $connection -Force -Confirm:$false -ErrorAction SilentlyContinue }
+            }
+            if ($cisConnection) { Disconnect-CisServer -Server $cisConnection -Force -Confirm:$false -ErrorAction SilentlyContinue }
+        }
+    }
+
+    # One job per task (none when there is no credential to open the worker's session). They
+    # share $startupLock to load PowerCLI and connect one at a time.
+    $startupLock = [System.Threading.SemaphoreSlim]::new(1, 1)
+    $jobs = [System.Collections.Generic.List[object]]::new()
+    foreach ($task in $Tasks) {
+        $vcenter = $task.VCenter
+        if (-not $vcenter.Credential) { $jobs.Add($null); continue }
+        $jobs.Add((Start-ThreadJob -ThrottleLimit $ThrottleLimit -ScriptBlock $worker -ArgumentList @(
+            $modulesFolder, $collectionModule, $vcenter.Connection.Name, $vcenter.Credential,
+            (Get-SessionSecret $vcenter.Connection), $task.WithCis, $task.Command, $task.Arguments, $startupLock
+        )))
+    }
+
+    for ($i = 0; $i -lt $Tasks.Count; $i++) {
+        $job = $jobs[$i]
+        if ($null -eq $job) {
+            [PSCustomObject]@{ Ok = $false; Result = $null; Error = "No hay credencial guardada para '$($Tasks[$i].VCenter.Name)'" }
+            continue
+        }
+
+        # A worker that hangs (network, vCenter not answering) must not hang the whole run: after
+        # the timeout it is stopped and its work is redone in sequence by the caller
+        if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {
+            Stop-Job -Job $job
+            Remove-Job -Job $job -Force
+            [PSCustomObject]@{ Ok = $false; Result = $null; Error = "Tiempo agotado ($([math]::Round($TimeoutSeconds / 60)) min)" }
+            continue
+        }
+
+        Write-Host "`n--- $($Tasks[$i].Label) ---" -ForegroundColor DarkCyan
+        $output = @(Receive-Job -Job $job -Wait -AutoRemoveJob -ErrorAction Continue -ErrorVariable jobErrors)
+        $outcome = $output | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['Ok'] -and $_.PSObject.Properties['Log'] } | Select-Object -Last 1
+        if ($outcome) {
+            Write-WorkerLog $outcome.Log
+            [PSCustomObject]@{ Ok = $outcome.Ok; Result = $outcome.Result; Error = $outcome.Error }
+        }
+        else {
+            [PSCustomObject]@{ Ok = $false; Result = $null; Error = "La tarea no devolvio resultado. $($jobErrors | Select-Object -First 1)" }
+        }
+    }
+}
+
+# Shows what a worker wrote, as it would have looked running here
+function Write-WorkerLog($log) {
+    foreach ($entry in $log) {
+        if ($entry -is [System.Management.Automation.InformationRecord]) {
+            $message = $entry.MessageData
+            if ($message -is [System.Management.Automation.HostInformationMessage]) {
+                $hostParams = @{ Object = $message.Message; NoNewline = $message.NoNewLine }
+                if ($null -ne $message.ForegroundColor) { $hostParams['ForegroundColor'] = $message.ForegroundColor }
+                Write-Host @hostParams
+            }
+            else { Write-Host $message }
+        }
+        elseif ($entry -is [System.Management.Automation.WarningRecord]) { Write-Warning $entry.Message }
+        elseif ($entry -is [System.Management.Automation.ErrorRecord]) { Write-Host $entry.ToString() -ForegroundColor Red }
+        elseif ($entry -is [System.Management.Automation.VerboseRecord] -or $entry -is [System.Management.Automation.DebugRecord]) { continue }
+        else { Write-Host $entry }
+    }
+}
+
+# ---------------------------------------------------------------------------------------
+# Timing and output
+# ---------------------------------------------------------------------------------------
 
 # Runs one collection stage, records how long it took in $Timings and returns its output
 function Measure-CollectionStage {
@@ -208,7 +566,7 @@ function Write-StageTimings {
     Write-Host "`n`tTiempos de $Title (total $(Format-Duration $total)):" -ForegroundColor Cyan
     foreach ($entry in ($Timings.GetEnumerator() | Sort-Object { $_.Value } -Descending)) {
         $share = if ($total.TotalSeconds -gt 0) { $entry.Value.TotalSeconds / $total.TotalSeconds * 100 } else { 0 }
-        Write-Host ("`t  {0,-30} {1,9} {2,5:0}%" -f $entry.Key, (Format-Duration $entry.Value), $share)
+        Write-Host ("`t  {0,-34} {1,9} {2,5:0}%" -f $entry.Key, (Format-Duration $entry.Value), $share)
     }
 }
 
@@ -241,4 +599,5 @@ function Save-CollectionJson {
     return $jsonPath
 }
 
-Export-ModuleMember -Function Connect-VCenters, Disconnect-VCenters, Invoke-ProactivaCollection, Invoke-DriverCollection
+# The *Worker functions are called by the thread jobs, which import this module
+Export-ModuleMember -Function Connect-VCenters, Disconnect-VCenters, Invoke-ProactivaCollection, Invoke-DriverCollection, Invoke-VCenterCollectionWorker, Invoke-HostDriversWorker
