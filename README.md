@@ -74,6 +74,8 @@ Corre los chequeos que corresponden al tipo de proactiva. Cada chequeo lee una h
 - si encuentra algo, agrega una hoja de detalle al **Anexo Técnico**;
 - completa las columnas Estado y Detalle de su ID en la **Checklist** (copia de `src\report\templates\checklist-template.xlsx`).
 
+La Checklist solo conserva las tareas que corresponden a la visita según su columna "Recurrencia", en todos los componentes (vSphere, Veeam, NSX, Horizon): una mensual tiene solo las mensuales, una trimestral las mensuales y trimestrales, y una semestral todas.
+
 Las hojas vacías no se generan. Si regenerás el anexo para el mismo cliente y mes, se arma desde cero (no acumula hojas viejas).
 
 ---

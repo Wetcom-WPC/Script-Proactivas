@@ -71,7 +71,7 @@ function New-ProactivaReport {
         $results += & $check $context
     }
 
-    Update-Checklist -TemplatePath (Join-Path $PSScriptRoot 'templates\checklist-template.xlsx') -OutputPath $context.ChecklistPath -Results $results
+    Update-Checklist -TemplatePath (Join-Path $PSScriptRoot 'templates\checklist-template.xlsx') -OutputPath $context.ChecklistPath -Results $results -Frequency $Frequency
 
     return [PSCustomObject]@{
         AnnexPath     = if (Test-Path $context.AnnexPath) { $context.AnnexPath } else { $null }
@@ -79,12 +79,22 @@ function New-ProactivaReport {
     }
 }
 
-# Copies the template and fills Estado (G) and Detalle (H) on the row of each result's ID
+# Recurrences (column C "Recurrencia" of the checklist) that belong to each visit. Rows with
+# any other known recurrence are removed, so a monthly checklist only has monthly tasks.
+$script:recurrencesByFrequency = @{
+    Monthly    = @('Mensual')
+    Quarterly  = @('Mensual', 'Trimestral')
+    Semiannual = @('Mensual', 'Trimestral', 'Semestral')
+}
+
+# Copies the template, keeps only the rows of this visit's frequency, adds the client-specific
+# rows (e.g. VSP-TR-02-NX) and fills Estado (G) and Detalle (H) on the row of each result's ID
 function Update-Checklist {
     param(
         [Parameter(Mandatory = $true)] [string] $TemplatePath,
         [Parameter(Mandatory = $true)] [string] $OutputPath,
-        [Parameter(Mandatory = $true)] [object[]] $Results
+        [Parameter(Mandatory = $true)] [object[]] $Results,
+        [Parameter(Mandatory = $true)] [ValidateSet('Monthly', 'Quarterly', 'Semiannual')] [string] $Frequency
     )
 
     Copy-Item -Path $TemplatePath -Destination $OutputPath -Force
@@ -93,11 +103,22 @@ function Update-Checklist {
     try {
         $sheet = $package.Workbook.Worksheets["Checklist"]
 
-        # Rows that exist only for this client (e.g. VSP-TR-02-NX) are created first, so the
-        # lookup by ID below finds them like any template row
+        # EPPlus does not move the dropdowns (data validations) when rows are deleted or
+        # inserted: they are taken out, followed cell by cell while rows change, and put back
+        $dropdowns = Get-ChecklistDropdowns -Sheet $sheet
+        # One by one: DataValidations.Clear() empties the list but leaves them in the file,
+        # which would end up with every dropdown twice
+        foreach ($validation in @($sheet.DataValidations)) { [void]$sheet.DataValidations.Remove($validation) }
+
+        Remove-ChecklistRowsOutsideVisit -Sheet $sheet -Frequency $Frequency -Dropdowns $dropdowns
+
+        # Rows that exist only for this client are created before filling, so the lookup by
+        # ID below finds them like any template row
         foreach ($result in ($Results | Where-Object { $_.PSObject.Properties['InsertAfter'] })) {
-            Add-ChecklistRow -Sheet $sheet -AfterId $result.InsertAfter -Result $result
+            Add-ChecklistRow -Sheet $sheet -AfterId $result.InsertAfter -Result $result -Dropdowns $dropdowns
         }
+
+        Restore-ChecklistDropdowns -Sheet $sheet -Dropdowns $dropdowns
 
         foreach ($result in $Results) {
             $idCell = $sheet.Cells["A:A"] | Where-Object { $_.Text -eq $result.ID }
@@ -116,14 +137,44 @@ function Update-Checklist {
     }
 }
 
-# Inserts a row right below the row of $AfterId, copying that row's look and Estado dropdown,
-# and fills ID / Procedimiento / Chequeo from $Result. EPPlus does not move the dropdowns
-# (data validations) when inserting a row, so they are rebuilt shifted by one row.
+# Deletes the rows whose recurrence does not belong to the visit (bottom-up, so the row
+# numbers still to visit do not move). Rows with an unknown recurrence are kept.
+function Remove-ChecklistRowsOutsideVisit {
+    param(
+        [Parameter(Mandatory = $true)] $Sheet,
+        [Parameter(Mandatory = $true)] [string] $Frequency,
+        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]] $Dropdowns
+    )
+
+    $allowed = $script:recurrencesByFrequency[$Frequency]
+    $known = $script:recurrencesByFrequency['Semiannual']
+    $removed = 0
+
+    for ($row = $Sheet.Dimension.End.Row; $row -ge 2; $row--) {
+        if (-not $Sheet.Cells["A$row"].Text) { continue }
+        $recurrence = $Sheet.Cells["C$row"].Text.Trim()
+        if ($recurrence -notin $known -or $recurrence -in $allowed) { continue }
+
+        $Sheet.DeleteRow($row, 1)
+        $removed++
+
+        foreach ($dropdown in @($Dropdowns | Where-Object { $_.Row -eq $row })) { [void]$Dropdowns.Remove($dropdown) }
+        foreach ($dropdown in $Dropdowns) { if ($dropdown.Row -gt $row) { $dropdown.Row-- } }
+    }
+
+    if ($removed -gt 0) {
+        Write-Host "Checklist: se quitaron $removed tareas que no corresponden a la proactiva ($($allowed -join ' / '))." -ForegroundColor DarkGray
+    }
+}
+
+# Inserts a row right below the row of $AfterId with that row's look and Estado dropdown, and
+# fills ID / Procedimiento / Chequeo from $Result
 function Add-ChecklistRow {
     param(
         [Parameter(Mandatory = $true)] $Sheet,
         [Parameter(Mandatory = $true)] [string] $AfterId,
-        [Parameter(Mandatory = $true)] $Result
+        [Parameter(Mandatory = $true)] $Result,
+        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]] $Dropdowns
     )
 
     $afterCell = $Sheet.Cells["A:A"] | Where-Object { $_.Text -eq $AfterId }
@@ -134,29 +185,10 @@ function Add-ChecklistRow {
     $source = $afterCell.Start.Row
     $new = $source + 1
 
-    # Dropdowns before the insertion: [address, list formula]
-    $validations = @($Sheet.DataValidations | ForEach-Object {
-        [PSCustomObject]@{ Address = $_.Address.Address; Formula = $_.Formula.ExcelFormula }
-    })
-    $sourceFormula = ($validations | Where-Object {
-        $_.Address -split ' ' | Where-Object { Test-CellInRange -Range $_ -Column 'G' -Row $source }
-    } | Select-Object -First 1).Formula
-
-    $Sheet.DataValidations.Clear()
     $Sheet.InsertRow($new, 1)
-
-    foreach ($validation in $validations) {
-        $shifted = @($validation.Address -split ' ' | ForEach-Object { Move-RangeForInsertedRow -Range $_ -InsertedRow $new }) -join ' '
-        $list = $Sheet.DataValidations.AddListValidation($shifted)
-        $list.Formula.ExcelFormula = $validation.Formula
-        $list.AllowBlank = $true
-        $list.ShowErrorMessage = $true
-    }
-    if ($sourceFormula) {
-        $list = $Sheet.DataValidations.AddListValidation("G$new")
-        $list.Formula.ExcelFormula = $sourceFormula
-        $list.AllowBlank = $true
-        $list.ShowErrorMessage = $true
+    foreach ($dropdown in $Dropdowns) { if ($dropdown.Row -ge $new) { $dropdown.Row++ } }
+    foreach ($dropdown in @($Dropdowns | Where-Object { $_.Row -eq $source })) {
+        $Dropdowns.Add([PSCustomObject]@{ Column = $dropdown.Column; Row = $new; Formula = $dropdown.Formula })
     }
 
     # Same look as the source row, then its own content
@@ -168,32 +200,54 @@ function Add-ChecklistRow {
     foreach ($column in 'G', 'H', 'I') { $Sheet.Cells["$column$new"].Value = $null }
 }
 
-# Does a validation range such as "G14:G16" or "G18" cover the given cell?
-function Test-CellInRange {
-    param([string] $Range, [string] $Column, [int] $Row)
+# Every cell that has a dropdown, as { Column; Row; Formula }
+function Get-ChecklistDropdowns {
+    param([Parameter(Mandatory = $true)] $Sheet)
 
-    if ($Range -notmatch '^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$') { return $false }
-    $firstColumn = $matches[1]; $firstRow = [int]$matches[2]
-    $lastColumn = if ($matches[3]) { $matches[3] } else { $firstColumn }
-    $lastRow = if ($matches[4]) { [int]$matches[4] } else { $firstRow }
-    return ($Column -ge $firstColumn -and $Column -le $lastColumn -and $Row -ge $firstRow -and $Row -le $lastRow)
+    $dropdowns = [System.Collections.Generic.List[object]]::new()
+    foreach ($validation in $Sheet.DataValidations) {
+        foreach ($range in ($validation.Address.Address -split ' ')) {
+            if ($range -notmatch '^([A-Z])(\d+)(?::([A-Z])(\d+))?$') {
+                Write-Warning "Desplegable con un rango no soportado ('$range'); se omite."
+                continue
+            }
+            $lastColumn = if ($matches[3]) { $matches[3] } else { $matches[1] }
+            $lastRow = if ($matches[4]) { [int]$matches[4] } else { [int]$matches[2] }
+            foreach ($column in ([int][char]$matches[1])..([int][char]$lastColumn)) {
+                foreach ($row in ([int]$matches[2])..$lastRow) {
+                    $dropdowns.Add([PSCustomObject]@{ Column = [string][char]$column; Row = $row; Formula = $validation.Formula.ExcelFormula })
+                }
+            }
+        }
+    }
+    return , $dropdowns
 }
 
-# A validation range after a row was inserted at $InsertedRow: rows at or below it move down
-# one; a range that spans the new row is split around it (the new row gets its own dropdown).
-function Move-RangeForInsertedRow {
-    param([string] $Range, [int] $InsertedRow)
+# Puts the dropdowns back, one validation per list, with consecutive rows joined in ranges
+function Restore-ChecklistDropdowns {
+    param(
+        [Parameter(Mandatory = $true)] $Sheet,
+        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]] $Dropdowns
+    )
 
-    if ($Range -notmatch '^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$') { return $Range }
-    $firstColumn = $matches[1]; $firstRow = [int]$matches[2]
-    $lastColumn = if ($matches[3]) { $matches[3] } else { $firstColumn }
-    $lastRow = if ($matches[4]) { [int]$matches[4] } else { $firstRow }
+    foreach ($group in ($Dropdowns | Group-Object -Property Formula)) {
+        $ranges = foreach ($columnGroup in ($group.Group | Group-Object -Property Column)) {
+            $rows = @($columnGroup.Group.Row | Sort-Object -Unique)
+            $start = $rows[0]
+            for ($i = 0; $i -lt $rows.Count; $i++) {
+                if ($i -eq $rows.Count - 1 -or $rows[$i + 1] -ne $rows[$i] + 1) {
+                    $column = $columnGroup.Name
+                    if ($start -eq $rows[$i]) { "$column$start" } else { "$column${start}:$column$($rows[$i])" }
+                    if ($i -lt $rows.Count - 1) { $start = $rows[$i + 1] }
+                }
+            }
+        }
 
-    $format = { param($c1, $r1, $c2, $r2) if ($c1 -eq $c2 -and $r1 -eq $r2) { "$c1$r1" } else { "${c1}${r1}:${c2}${r2}" } }
-
-    if ($lastRow -lt $InsertedRow) { return $Range }
-    if ($firstRow -ge $InsertedRow) { return & $format $firstColumn ($firstRow + 1) $lastColumn ($lastRow + 1) }
-    return (& $format $firstColumn $firstRow $lastColumn ($InsertedRow - 1)), (& $format $firstColumn ($InsertedRow + 1) $lastColumn ($lastRow + 1)) -join ' '
+        $list = $Sheet.DataValidations.AddListValidation(($ranges -join ' '))
+        $list.Formula.ExcelFormula = $group.Name
+        $list.AllowBlank = $true
+        $list.ShowErrorMessage = $true
+    }
 }
 
 # ---------------------------------------------------------------------------------------
