@@ -58,6 +58,11 @@ $frequencyLabels = [ordered]@{
 
 Import-Module (Join-Path $PSScriptRoot 'shared\RunFolder.psm1') -Force
 
+# Duration as m:ss (shown in the final summary)
+function Format-StageDuration([TimeSpan] $Duration) {
+    return "{0}:{1:00}" -f [math]::Floor($Duration.TotalMinutes), $Duration.Seconds
+}
+
 # ---------------------------------------------------------------------------------------
 # Visit details: asked up front so the rest of the run is unattended
 # ---------------------------------------------------------------------------------------
@@ -125,6 +130,8 @@ if ($SkipAlarmTest) { Write-Host "Prueba de alarmas (Falso Positivo): OMITIDA" -
 
 $exitCode = 0
 $connectedVCenters = @()
+$stageTimings = [ordered]@{}
+$stageStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
     Import-Module (Join-Path $runtimeModules 'ImportExcel') -ErrorAction Stop
@@ -160,6 +167,8 @@ try {
 
         Disconnect-VCenters -VCenters $connectedVCenters
         $connectedVCenters = @()
+        $stageTimings['Recoleccion'] = $stageStopwatch.Elapsed
+        $stageStopwatch.Restart()
 
         # -------------------------------------------------------------------------------
         # 2. Conversion
@@ -170,6 +179,8 @@ try {
         foreach ($jsonFile in $jsonFiles) {
             [void](ConvertTo-RawExcel -JsonPath $jsonFile -ExcelFolder (Join-Path $runPath 'excel'))
         }
+        $stageTimings['Conversion a Excel'] = $stageStopwatch.Elapsed
+        $stageStopwatch.Restart()
     }
 
     # -----------------------------------------------------------------------------------
@@ -186,6 +197,7 @@ try {
 
     $report = New-ProactivaReport -RunFolder $runPath -RawExcelPath $rawExcel.FullName -DriverExcelPath $driverExcel.FullName `
         -Client $Client -Month $Month -Frequency $Frequency
+    $stageTimings['Anexo y Checklist'] = $stageStopwatch.Elapsed
 
     Write-Host "`n==========================================================" -ForegroundColor Green
     Write-Host " Proceso completado" -ForegroundColor Green
@@ -194,6 +206,7 @@ try {
     if ($Frequency -eq 'Semiannual' -and (Get-ChildItem (Join-Path $runPath 'vds_configuration') -Filter '*.zip' -ErrorAction SilentlyContinue)) {
         Write-Host " Recuerde subir al Drive los .zip de: $(Join-Path $runPath 'vds_configuration')" -ForegroundColor Yellow
     }
+    Write-Host " Tiempos:   $(($stageTimings.GetEnumerator() | ForEach-Object { "$($_.Key) $(Format-StageDuration $_.Value)" }) -join ' | ')" -ForegroundColor Green
     Write-Host "==========================================================" -ForegroundColor Green
 }
 catch {

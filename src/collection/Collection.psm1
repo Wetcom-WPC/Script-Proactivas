@@ -105,12 +105,13 @@ function Invoke-ProactivaCollection {
         $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
         $server = $vcenter.Connection
         Write-Host "`nProcesando vCenter: $($vcenter.Name)"
+        $timings = [ordered]@{}
 
         Write-Host "`tObteniendo objetos principales..."
-        $hosts = Get-VMHost -Server $server
-        $clusters = Get-Cluster -Server $server
-        $vdSwitches = Get-VDSwitch -Server $server
-        $vmCount = @(Get-VM -Server $server).Count
+        $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $server })
+        $clusters = @(Measure-CollectionStage $timings 'Clusters' { Get-Cluster -Server $server })
+        $vdSwitches = @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $server })
+        $vmCount = Measure-CollectionStage $timings 'Conteo de VMs' { @(Get-VM -Server $server).Count }
         Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $vmCount VMs, $($vdSwitches.Count) vDS."
 
         # VMs and snapshots host by host (faster than one big query on large inventories)
@@ -118,38 +119,42 @@ function Invoke-ProactivaCollection {
         $allSnapshots = [System.Collections.ArrayList]@()
 
         Write-Host "`tRecolectando VMs y snapshots (puede demorar)..."
-        for ($i = 0; $i -lt $hosts.Count; $i++) {
-            $vmHost = $hosts[$i]
-            Write-Progress -Activity "Recolectando datos de $($vcenter.Name)" -Status "Host $($i+1)/$($hosts.Count): $($vmHost.Name)" -PercentComplete (($i / $hosts.Count) * 100)
+        Measure-CollectionStage $timings 'VMs y snapshots' {
+            for ($i = 0; $i -lt $hosts.Count; $i++) {
+                $vmHost = $hosts[$i]
+                Write-Progress -Activity "Recolectando datos de $($vcenter.Name)" -Status "Host $($i+1)/$($hosts.Count): $($vmHost.Name)" -PercentComplete (($i / $hosts.Count) * 100)
 
-            $vmsOnHost = @(Get-VM -Location $vmHost)
-            if ($vmsOnHost) {
-                [void]$allVms.AddRange($vmsOnHost)
+                $vmsOnHost = @(Get-VM -Location $vmHost)
+                if ($vmsOnHost) {
+                    [void]$allVms.AddRange($vmsOnHost)
 
-                $snapshotsOnHost = @(Get-Snapshot -VM $vmsOnHost)
-                if ($snapshotsOnHost) {
-                    [void]$allSnapshots.AddRange($snapshotsOnHost)
+                    $snapshotsOnHost = @(Get-Snapshot -VM $vmsOnHost)
+                    if ($snapshotsOnHost) {
+                        [void]$allSnapshots.AddRange($snapshotsOnHost)
+                    }
                 }
             }
+            Write-Progress -Activity "Recoleccion completa" -Completed
         }
-        Write-Progress -Activity "Recoleccion completa" -Completed
 
         Write-Host "`tProcesando reportes..."
-        $collector.CollectAlarmTest([bool]$SkipAlarmTest)
-        $collector.CollectVCenterSizing($allVms, $hosts)
-        $collector.CollectBackupActivity()
-        $collector.CollectPerformanceHealth($clusters)
-        $collector.CollectCertificates()
-        $collector.CollectEsxi($hosts)
-        $collector.CollectVCenterInfo($allVms)
-        $collector.CollectVms($allVms, $clusters, $allSnapshots)
-        $collector.CollectDatastores($hosts)
-        $collector.CollectStandardSwitches($hosts)
-        $collector.CollectKernelAdapters($hosts)
-        $collector.CollectSnapshots($allSnapshots)
-        $collector.CollectPartitions($allVms)
-        $collector.CollectDistributedSwitches($vdSwitches)
-        $collector.CollectLicenses()
+        Measure-CollectionStage $timings 'Prueba de alarmas' { $collector.CollectAlarmTest([bool]$SkipAlarmTest) }
+        Measure-CollectionStage $timings 'Sizing del vCenter' { $collector.CollectVCenterSizing($allVms, $hosts) }
+        Measure-CollectionStage $timings 'Backups (VAMI)' { $collector.CollectBackupActivity() }
+        Measure-CollectionStage $timings 'Estadisticas de performance' { $collector.CollectPerformanceHealth($clusters) }
+        Measure-CollectionStage $timings 'Certificados del vCenter' { $collector.CollectCertificates() }
+        Measure-CollectionStage $timings 'ESXi' { $collector.CollectEsxi($hosts) }
+        Measure-CollectionStage $timings 'Informacion del vCenter' { $collector.CollectVCenterInfo($allVms) }
+        Measure-CollectionStage $timings 'VMs y placas de red' { $collector.CollectVms($allVms, $clusters, $allSnapshots) }
+        Measure-CollectionStage $timings 'Datastores' { $collector.CollectDatastores($hosts) }
+        Measure-CollectionStage $timings 'Standard switches' { $collector.CollectStandardSwitches($hosts) }
+        Measure-CollectionStage $timings 'Adaptadores VMkernel' { $collector.CollectKernelAdapters($hosts) }
+        Measure-CollectionStage $timings 'Snapshots' { $collector.CollectSnapshots($allSnapshots) }
+        Measure-CollectionStage $timings 'Particiones' { $collector.CollectPartitions($allVms) }
+        Measure-CollectionStage $timings 'vDS' { $collector.CollectDistributedSwitches($vdSwitches) }
+        Measure-CollectionStage $timings 'Licencias' { $collector.CollectLicenses() }
+
+        Write-StageTimings -Title "recoleccion de $($vcenter.Name)" -Timings $timings
     }
 
     return Save-CollectionJson -Name "Proactiva" -Report $collector.GetReport() -VCenters $VCenters -RunFolder $RunFolder
@@ -169,13 +174,55 @@ function Invoke-DriverCollection {
         $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
         Write-Host "`nProcesando drivers del vCenter: $($vcenter.Name)"
 
-        $hosts = Get-VMHost -Server $vcenter.Connection
+        $timings = [ordered]@{}
+        $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $vcenter.Connection })
         Write-Host "`t$($hosts.Count) hosts encontrados"
 
-        $collector.CollectHostDrivers($hosts)
+        Measure-CollectionStage $timings 'Drivers y firmware' { $collector.CollectHostDrivers($hosts) }
+        Write-StageTimings -Title "drivers de $($vcenter.Name)" -Timings $timings
     }
 
     return Save-CollectionJson -Name "DriverInfo" -Report $collector.GetReport() -VCenters $VCenters -RunFolder $RunFolder
+}
+
+# Runs one collection stage, records how long it took in $Timings and returns its output
+function Measure-CollectionStage {
+    param(
+        [Parameter(Mandatory = $true)] [System.Collections.Specialized.OrderedDictionary] $Timings,
+        [Parameter(Mandatory = $true)] [string] $Name,
+        [Parameter(Mandatory = $true)] [scriptblock] $Stage
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        & $Stage
+    }
+    finally {
+        $Timings[$Name] = $stopwatch.Elapsed
+    }
+}
+
+# Duration as m:ss.f (or s.f under a minute)
+function Format-Duration([TimeSpan] $Duration) {
+    if ($Duration.TotalMinutes -ge 1) { return "{0}:{1:00.0}" -f [math]::Floor($Duration.TotalMinutes), ($Duration.TotalSeconds % 60) }
+    return "{0:0.0} s" -f $Duration.TotalSeconds
+}
+
+# Table of the time each stage took, slowest first (ends up in the run log)
+function Write-StageTimings {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Title,
+        [Parameter(Mandatory = $true)] [System.Collections.Specialized.OrderedDictionary] $Timings
+    )
+
+    $total = [TimeSpan]::Zero
+    foreach ($duration in $Timings.Values) { $total += $duration }
+
+    Write-Host "`n`tTiempos de $Title (total $(Format-Duration $total)):" -ForegroundColor Cyan
+    foreach ($entry in ($Timings.GetEnumerator() | Sort-Object { $_.Value } -Descending)) {
+        $share = if ($total.TotalSeconds -gt 0) { $entry.Value.TotalSeconds / $total.TotalSeconds * 100 } else { 0 }
+        Write-Host ("`t  {0,-30} {1,9} {2,5:0}%" -f $entry.Key, (Format-Duration $entry.Value), $share)
+    }
 }
 
 function Save-CollectionJson {
