@@ -473,7 +473,8 @@ class ProactivaCollector {
                 VM              = $networkAdapter.Parent.Name
                 Cluster         = $this.GetClusterName($networkAdapter.Parent.VMHost)
                 Host            = $networkAdapter.Parent.VMHost.Name
-                Status          = $networkAdapter.Parent.PowerState
+                # PowerCLI's PowerState enum as its number (what the JSON always had)
+                Status          = [int]$networkAdapter.Parent.PowerState
                 Mac             = $networkAdapter.MacAddress
                 Connected       = if ($networkAdapter.ConnectionState.Connected) { "True" } else { "False" }
                 StartsConnected = if ($networkAdapter.ConnectionState.StartConnected) { "True" } else { "False" }

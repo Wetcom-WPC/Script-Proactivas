@@ -100,9 +100,9 @@ function Disconnect-VCenters {
 
 # Collects the Proactiva data (every sheet except "ESXi IO") from all vCenters.
 #
-# With more than one vCenter they are collected at the same time, one thread job each (see
-# Invoke-CollectionWorkers); -Sequential, or a missing ThreadJob module, collects them one
-# after the other. A vCenter whose worker fails is collected again here, in sequence.
+# With more than one vCenter they are collected at the same time, one worker process each
+# (see Invoke-CollectionWorkers); -Sequential collects them one after the other. A vCenter
+# whose worker fails is collected again here, in sequence.
 # Returns the path of the JSON file written to <RunFolder>\json.
 function Invoke-ProactivaCollection {
     param(
@@ -120,8 +120,10 @@ function Invoke-ProactivaCollection {
     $reports = @{}
 
     if (-not $Sequential -and $VCenters.Count -gt 1 -and (Test-ParallelCollection)) {
-        # Every worker needs the HCL, so it is waited for here and handed over once
-        $hclData = Get-HclReferenceData -ReferenceDataFolder $referenceDataFolder
+        # Every worker needs the HCL, so it is waited for here and handed over once (the
+        # lookup caches are rebuilt by each worker)
+        $loadedHcl = Get-HclReferenceData -ReferenceDataFolder $referenceDataFolder
+        $hclData = [PSCustomObject]@{ Servers = $loadedHcl.Servers; Source = $loadedHcl.Source; EsxiReleases = $loadedHcl.EsxiReleases }
 
         Write-Host "`nRecolectando $($VCenters.Count) vCenters en paralelo (el detalle de cada uno se muestra al terminar)..."
         $tasks = foreach ($vcenter in $VCenters) {
@@ -134,7 +136,7 @@ function Invoke-ProactivaCollection {
             }
         }
 
-        $results = @(Invoke-CollectionWorkers -Tasks $tasks -ThrottleLimit 4)
+        $results = @(Invoke-CollectionWorkers -Tasks $tasks)
         for ($i = 0; $i -lt $VCenters.Count; $i++) {
             if ($results[$i].Ok -and $results[$i].Result) { $reports[$i] = $results[$i].Result }
             else { Write-Warning "La recoleccion en paralelo de '$($VCenters[$i].Name)' fallo ($($results[$i].Error)). Se recolecta de nuevo, en secuencia." }
@@ -226,7 +228,11 @@ function Invoke-VCenterCollectionWorker {
         $HclData
     )
 
-    if ($HclData) { Set-HclReferenceData -Data $HclData }
+    if ($HclData) {
+        Add-Member -InputObject $HclData -NotePropertyName ModelEntries -NotePropertyValue ([System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)) -Force
+        Add-Member -InputObject $HclData -NotePropertyName Releases -NotePropertyValue ([System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new()) -Force
+        Set-HclReferenceData -Data $HclData
+    }
 
     $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
     $collector.SetCurrentVCenter($Connection, $CisConnection)
@@ -272,7 +278,7 @@ function Merge-CollectionReports {
 # visits only.
 #
 # esxcli through vCenter is slow and each host is independent, so the hosts of a vCenter are
-# split among several thread jobs (unless -Sequential, or there are only a few hosts). Hosts
+# split among several worker processes (unless -Sequential, or there are only a few hosts). Hosts
 # whose worker fails are collected here, in sequence. Rows keep the order of the hosts.
 # Returns the path of the JSON file written to <RunFolder>\json.
 function Invoke-DriverCollection {
@@ -283,7 +289,7 @@ function Invoke-DriverCollection {
     )
 
     $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
-    $maxWorkers = 6
+    $maxWorkers = 4
     $minHostsForParallel = 6
 
     foreach ($vcenter in $VCenters) {
@@ -321,7 +327,7 @@ function Invoke-DriverCollection {
                         HostIds   = $hostIds
                     }
                 }
-                $results = @(Invoke-CollectionWorkers -Tasks $tasks -ThrottleLimit $workerCount)
+                $results = @(Invoke-CollectionWorkers -Tasks $tasks)
 
                 # Rows by host; hosts of a failed worker are collected here
                 $rowsByHost = @{}
@@ -390,31 +396,29 @@ function Invoke-HostDriversWorker {
 # Parallel workers
 # ---------------------------------------------------------------------------------------
 
-# Whether collection can run in thread jobs (the bundled runtime includes ThreadJob)
+# Whether collection can run in parallel workers (background jobs, always available in pwsh)
 function Test-ParallelCollection {
-    return [bool](Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+    return [bool](Get-Command Start-Job -ErrorAction SilentlyContinue)
 }
 
-# Session secret of a PowerCLI connection (SessionSecret in current PowerCLI, SessionId before)
-function Get-SessionSecret($connection) {
-    if ($null -eq $connection) { return $null }
-    if ($connection.PSObject.Properties['SessionSecret']) { return $connection.SessionSecret }
-    return $connection.SessionId
-}
-
-# Runs each task in its own thread job and returns one result per task, in the same order:
-# @{ Ok; Result; Error }. A task is @{ Label; VCenter; WithCis; Command; Arguments }: the
-# worker imports PowerCLI and this module, opens its OWN session to the vCenter with the
-# credential that worked in Connect-VCenters (SOAP, and CIS when WithCis), runs
-# "<Command> -Connection -CisConnection @Arguments" and disconnects that session. If PowerCLI
-# ever hands the worker the main session instead of a new one, it is not disconnected.
+# Runs each task in its own worker and returns one result per task, in the same order:
+# @{ Ok; Result; Error }. A task is @{ Label; VCenter; WithCis; Command; Arguments }.
 #
-# The console output of each worker (Write-Host, warnings) is shown when it finishes, in task
+# Each worker is a separate pwsh PROCESS (Start-Job), not a thread: PowerCLI keeps connection
+# state per process, and two thread jobs connecting at once break each other ("You have
+# modified the global:DefaultVIServer ... system variables"). The worker loads PowerCLI and
+# this module, opens its OWN session to the vCenter with the credential that worked in
+# Connect-VCenters (SOAP, and CIS when WithCis), runs "<Command> -Connection -CisConnection
+# @Arguments" and disconnects that session.
+#
+# Arguments and results travel as Clixml files in a temporary folder (deleted at the end):
+# job output is only serialized one level deep, which would flatten the report rows.
+#
+# What each worker writes (Write-Host, warnings, errors) is shown when it finishes, in task
 # order, so the log stays readable.
 function Invoke-CollectionWorkers {
     param(
         [Parameter(Mandatory = $true)] [object[]] $Tasks,
-        [int] $ThrottleLimit = 4,
         # Longest a worker may take (counted from when its turn to be waited for comes)
         [int] $TimeoutSeconds = 3 * 60 * 60,
         # Where the workers load PowerCLI from: the bundled runtime (tests point it at stubs)
@@ -423,127 +427,124 @@ function Invoke-CollectionWorkers {
 
     $modulesFolder = (Resolve-Path $ModulesFolder).Path
     $collectionModule = Join-Path $PSScriptRoot 'Collection.psm1'
+    $exchangeFolder = Join-Path ([System.IO.Path]::GetTempPath()) ("proactiva-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $exchangeFolder -Force | Out-Null
 
     $worker = {
-        param($ModulesFolder, $CollectionModule, $Server, $Credential, $MainSession, $WithCis, $Command, $Arguments, $StartupLock)
+        param($ModulesFolder, $CollectionModule, $Server, $Credential, $WithCis, $Command, $InputPath, $OutputPath)
 
+        # Same policy the launcher gives the main process (the files may carry the "downloaded
+        # from the internet" mark); process scope only
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
         $ErrorActionPreference = 'Continue'
         $connection = $null
         $cisConnection = $null
-        # Everything the work writes (Write-Host, warnings, errors), in order, for the main
-        # process to show: Receive-Job does not replay Write-Host from thread jobs
+        # Everything the work writes, in order, as plain entries the main process can show
         $log = [System.Collections.Generic.List[object]]::new()
-        $lockTaken = $false
+        $outcome = $null
         try {
-            # Loading and initializing PowerCLI in several runspaces at once collides ("Collection
-            # was modified"), so the workers take turns until they are connected; the work itself
-            # runs in parallel.
-            $lockTaken = $StartupLock.Wait([TimeSpan]::FromMinutes(10))
-            if (-not $lockTaken) { throw "Tiempo agotado esperando el turno para cargar PowerCLI." }
-
-            # PowerCLI complains that its vi:/vmstore: drives are already mounted (by the main
-            # runspace) but loads fine, so import errors are silenced (the module's own nested
-            # imports only follow the preference variable) and the load is checked by its commands.
-            $ErrorActionPreference = 'SilentlyContinue'
             foreach ($module in 'VMware.VimAutomation.Sdk', 'VMware.VimAutomation.Common', 'VMware.VimAutomation.Cis.Core', 'VMware.VimAutomation.Core', 'VMware.VimAutomation.Vds') {
-                Import-Module (Join-Path $ModulesFolder $module) -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                Import-Module (Join-Path $ModulesFolder $module) -ErrorAction Stop -WarningAction SilentlyContinue
             }
-            $ErrorActionPreference = 'Continue'
-            $missing = @('Connect-VIServer', 'Connect-CisServer', 'Get-VDSwitch' | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
-            if ($missing.Count -gt 0) { throw "No se pudo cargar PowerCLI en la tarea en paralelo (faltan: $($missing -join ', '))." }
-
             Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
             Import-Module $CollectionModule -ErrorAction Stop -WarningAction SilentlyContinue
 
             $connection = Connect-VIServer -Server $Server -Credential $Credential -ErrorAction Stop
             if ($WithCis) {
                 try { $cisConnection = Connect-CisServer -Server $Server -Credential $Credential -ErrorAction Stop }
-                catch { $log.Add("WARNING: `t-> La conexion CIS (REST) fallo: $($_.Exception.Message)") }
+                catch { $log.Add([PSCustomObject]@{ Kind = 'Warning'; Text = "`t-> La conexion CIS (REST) fallo: $($_.Exception.Message)" }) }
             }
-            [void]$StartupLock.Release()
-            $lockTaken = $false
 
-            $result = foreach ($item in (& $Command -Connection $connection -CisConnection $cisConnection @Arguments *>&1)) {
-                if ($item -is [System.Management.Automation.InformationRecord] -or $item -is [System.Management.Automation.WarningRecord] -or
-                    $item -is [System.Management.Automation.ErrorRecord] -or $item -is [System.Management.Automation.VerboseRecord] -or
-                    $item -is [System.Management.Automation.DebugRecord]) {
-                    $log.Add($item)
+            $arguments = Import-Clixml -Path $InputPath
+            $result = foreach ($item in (& $Command -Connection $connection -CisConnection $cisConnection @arguments *>&1)) {
+                if ($item -is [System.Management.Automation.InformationRecord]) {
+                    $message = $item.MessageData
+                    if ($message -is [System.Management.Automation.HostInformationMessage]) {
+                        $log.Add([PSCustomObject]@{ Kind = 'Host'; Text = [string]$message.Message; NoNewLine = [bool]$message.NoNewLine; Color = if ($null -ne $message.ForegroundColor) { [string]$message.ForegroundColor } else { $null } })
+                    }
+                    else { $log.Add([PSCustomObject]@{ Kind = 'Host'; Text = [string]$message; NoNewLine = $false; Color = $null }) }
                 }
+                elseif ($item -is [System.Management.Automation.WarningRecord]) { $log.Add([PSCustomObject]@{ Kind = 'Warning'; Text = $item.Message }) }
+                elseif ($item -is [System.Management.Automation.ErrorRecord]) { $log.Add([PSCustomObject]@{ Kind = 'Error'; Text = $item.ToString() }) }
+                elseif ($item -is [System.Management.Automation.VerboseRecord] -or $item -is [System.Management.Automation.DebugRecord]) { }
                 else { $item }
             }
-            [PSCustomObject]@{ Ok = $true; Result = $result; Error = $null; Log = $log }
+            $outcome = [PSCustomObject]@{ Ok = $true; Result = $result; Error = $null; Log = $log }
         }
         catch {
-            [PSCustomObject]@{ Ok = $false; Result = $null; Error = $_.Exception.Message; Log = $log }
+            $outcome = [PSCustomObject]@{ Ok = $false; Result = $null; Error = $_.Exception.Message; Log = $log }
         }
         finally {
-            if ($lockTaken) { [void]$StartupLock.Release() }
-            if ($connection) {
-                $secret = if ($connection.PSObject.Properties['SessionSecret']) { $connection.SessionSecret } else { $connection.SessionId }
-                if ($secret -ne $MainSession) { Disconnect-VIServer -Server $connection -Force -Confirm:$false -ErrorAction SilentlyContinue }
-            }
+            if ($connection) { Disconnect-VIServer -Server $connection -Force -Confirm:$false -ErrorAction SilentlyContinue }
             if ($cisConnection) { Disconnect-CisServer -Server $cisConnection -Force -Confirm:$false -ErrorAction SilentlyContinue }
         }
+        $outcome | Export-Clixml -Path $OutputPath -Depth 20
     }
 
-    # One job per task (none when there is no credential to open the worker's session). They
-    # share $startupLock to load PowerCLI and connect one at a time.
-    $startupLock = [System.Threading.SemaphoreSlim]::new(1, 1)
-    $jobs = [System.Collections.Generic.List[object]]::new()
-    foreach ($task in $Tasks) {
-        $vcenter = $task.VCenter
-        if (-not $vcenter.Credential) { $jobs.Add($null); continue }
-        $jobs.Add((Start-ThreadJob -ThrottleLimit $ThrottleLimit -ScriptBlock $worker -ArgumentList @(
-            $modulesFolder, $collectionModule, $vcenter.Connection.Name, $vcenter.Credential,
-            (Get-SessionSecret $vcenter.Connection), $task.WithCis, $task.Command, $task.Arguments, $startupLock
-        )))
+    try {
+        # One job per task (none when there is no credential to open the worker's session)
+        $jobs = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $Tasks.Count; $i++) {
+            $task = $Tasks[$i]
+            if (-not $task.VCenter.Credential) { $jobs.Add($null); continue }
+
+            $inputPath = Join-Path $exchangeFolder "input-$i.xml"
+            $task.Arguments | Export-Clixml -Path $inputPath -Depth 20
+            $jobs.Add((Start-Job -ScriptBlock $worker -ArgumentList @(
+                $modulesFolder, $collectionModule, $task.VCenter.Connection.Name, $task.VCenter.Credential,
+                $task.WithCis, $task.Command, $inputPath, (Join-Path $exchangeFolder "output-$i.xml")
+            )))
+        }
+
+        for ($i = 0; $i -lt $Tasks.Count; $i++) {
+            $job = $jobs[$i]
+            if ($null -eq $job) {
+                [PSCustomObject]@{ Ok = $false; Result = $null; Error = "No hay credencial guardada para '$($Tasks[$i].VCenter.Name)'" }
+                continue
+            }
+
+            # A worker that hangs (network, vCenter not answering) must not hang the whole run:
+            # after the timeout it is stopped and its work is redone in sequence by the caller
+            if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {
+                Stop-Job -Job $job
+                Remove-Job -Job $job -Force
+                [PSCustomObject]@{ Ok = $false; Result = $null; Error = "Tiempo agotado ($([math]::Round($TimeoutSeconds / 60)) min)" }
+                continue
+            }
+
+            Write-Host "`n--- $($Tasks[$i].Label) ---" -ForegroundColor DarkCyan
+            $jobErrors = $null
+            Receive-Job -Job $job -Wait -AutoRemoveJob -ErrorAction Continue -ErrorVariable jobErrors | Out-Null
+
+            $outputPath = Join-Path $exchangeFolder "output-$i.xml"
+            if (Test-Path $outputPath) {
+                $outcome = Import-Clixml -Path $outputPath
+                Write-WorkerLog $outcome.Log
+                [PSCustomObject]@{ Ok = [bool]$outcome.Ok; Result = $outcome.Result; Error = $outcome.Error }
+            }
+            else {
+                [PSCustomObject]@{ Ok = $false; Result = $null; Error = "La tarea no devolvio resultado. $($jobErrors | Select-Object -First 1)" }
+            }
+        }
     }
-
-    for ($i = 0; $i -lt $Tasks.Count; $i++) {
-        $job = $jobs[$i]
-        if ($null -eq $job) {
-            [PSCustomObject]@{ Ok = $false; Result = $null; Error = "No hay credencial guardada para '$($Tasks[$i].VCenter.Name)'" }
-            continue
-        }
-
-        # A worker that hangs (network, vCenter not answering) must not hang the whole run: after
-        # the timeout it is stopped and its work is redone in sequence by the caller
-        if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {
-            Stop-Job -Job $job
-            Remove-Job -Job $job -Force
-            [PSCustomObject]@{ Ok = $false; Result = $null; Error = "Tiempo agotado ($([math]::Round($TimeoutSeconds / 60)) min)" }
-            continue
-        }
-
-        Write-Host "`n--- $($Tasks[$i].Label) ---" -ForegroundColor DarkCyan
-        $output = @(Receive-Job -Job $job -Wait -AutoRemoveJob -ErrorAction Continue -ErrorVariable jobErrors)
-        $outcome = $output | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['Ok'] -and $_.PSObject.Properties['Log'] } | Select-Object -Last 1
-        if ($outcome) {
-            Write-WorkerLog $outcome.Log
-            [PSCustomObject]@{ Ok = $outcome.Ok; Result = $outcome.Result; Error = $outcome.Error }
-        }
-        else {
-            [PSCustomObject]@{ Ok = $false; Result = $null; Error = "La tarea no devolvio resultado. $($jobErrors | Select-Object -First 1)" }
-        }
+    finally {
+        Get-Job | Where-Object { $_.State -eq 'Running' -and $jobs -contains $_ } | Stop-Job
+        Remove-Item -Path $exchangeFolder -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 # Shows what a worker wrote, as it would have looked running here
 function Write-WorkerLog($log) {
     foreach ($entry in $log) {
-        if ($entry -is [System.Management.Automation.InformationRecord]) {
-            $message = $entry.MessageData
-            if ($message -is [System.Management.Automation.HostInformationMessage]) {
-                $hostParams = @{ Object = $message.Message; NoNewline = $message.NoNewLine }
-                if ($null -ne $message.ForegroundColor) { $hostParams['ForegroundColor'] = $message.ForegroundColor }
+        switch ($entry.Kind) {
+            'Host' {
+                $hostParams = @{ Object = $entry.Text; NoNewline = [bool]$entry.NoNewLine }
+                if ($entry.Color) { $hostParams['ForegroundColor'] = $entry.Color }
                 Write-Host @hostParams
             }
-            else { Write-Host $message }
+            'Warning' { Write-Warning $entry.Text }
+            'Error' { Write-Host $entry.Text -ForegroundColor Red }
         }
-        elseif ($entry -is [System.Management.Automation.WarningRecord]) { Write-Warning $entry.Message }
-        elseif ($entry -is [System.Management.Automation.ErrorRecord]) { Write-Host $entry.ToString() -ForegroundColor Red }
-        elseif ($entry -is [System.Management.Automation.VerboseRecord] -or $entry -is [System.Management.Automation.DebugRecord]) { continue }
-        else { Write-Host $entry }
     }
 }
 
@@ -620,5 +621,5 @@ function Save-CollectionJson {
     return $jsonPath
 }
 
-# The *Worker functions are called by the thread jobs, which import this module
+# The *Worker functions are called by the worker processes, which import this module
 Export-ModuleMember -Function Connect-VCenters, Disconnect-VCenters, Invoke-ProactivaCollection, Invoke-DriverCollection, Invoke-VCenterCollectionWorker, Invoke-HostDriversWorker

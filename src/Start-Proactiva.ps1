@@ -26,7 +26,7 @@ Skips collection and conversion and regenerates the annex/checklist from an exis
 
 .PARAMETER Sequential
 Collects everything in sequence. By default several vCenters, and the drivers of many hosts,
-are collected in parallel (thread jobs). Useful to debug or to compare results.
+are collected in parallel (one worker process each). Useful to debug or to compare results.
 
 .PARAMETER SkipAlarmTest
 Does not create the temporary "Falso Positivo" alarm in the vCenter (the only change the
@@ -159,7 +159,7 @@ try {
         }
         Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
 
-        # Background work (HCL download, parallel collection). Without it everything runs in sequence.
+        # Background download of the server HCL (thread job). Without it, it downloads when needed.
         Import-Module (Join-Path $runtimeModules 'ThreadJob') -ErrorAction SilentlyContinue
 
         Import-Module (Join-Path $PSScriptRoot 'collection\Collection.psm1') -Force -WarningAction SilentlyContinue
