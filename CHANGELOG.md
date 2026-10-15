@@ -1,5 +1,24 @@
 # Historial de versiones
 
+## v3.2.0 (2026-10-15)
+
+Recolección mucho más rápida. Las hojas, columnas, valores y el orden de las filas no cambian: se validó contra v3.1.0 en un cliente real (2 vCenters, 10 hosts, 365 VMs, trimestral). Los datos de las dos versiones coinciden; solo cambia lo que se movió entre corrida y corrida (una VM que hizo vMotion, snapshots de los backups).
+
+| Cliente real (2 vCenters, trimestral) | v3.1.0 | v3.2.0 |
+|---|---|---|
+| Recolección completa | 6:04 | 2:07 |
+
+**Qué cambió**
+- El inventario se lee con pocas consultas grandes: todas las VMs (con placas de red e ISOs) en una sola consulta, y la configuración de los hosts de lo que ya trae `Get-VMHost` o con consultas por lotes, en vez de varias llamadas por objeto. Los snapshots se piden solo para las VMs que tienen.
+- Las búsquedas en memoria que crecían al cuadrado con el inventario (placas, ISOs, snapshots, HCL) pasan a índices.
+- Varios vCenters se recolectan en paralelo, cada uno en un proceso aparte con su propia sesión. Los drivers/firmware se reparten entre hasta 4 procesos por vCenter. Si un proceso falla, ese trabajo se rehace en secuencia; `-Sequential` desactiva el paralelismo.
+- La HCL de servidores de Broadcom se descarga en segundo plano mientras se lee el inventario.
+- El log muestra cuánto tardó cada etapa por vCenter, y al final de la corrida se resume la duración de recolección, conversión y anexo.
+- `src\tools\Compare-CollectionJson.ps1` compara los JSON de dos corridas hoja por hoja, para validar cambios en la recolección.
+
+**Limitaciones conocidas**
+- El orden de las filas de Standard Switch se verificó con hosts de un solo vSwitch; con varios vSwitch por host, los switches salen en el orden de la configuración del host.
+
 ## v3.1.0 (2026-10-15)
 
 Primera versión publicada de la línea 3.x. Reemplaza al flujo anterior de tres ventanas y menú.

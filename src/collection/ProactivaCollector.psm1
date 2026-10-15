@@ -1587,8 +1587,24 @@ function Get-VmInventory {
         $vmsByHostId[$hostId].Add($vm)
     }
 
+    # Within a host, the order of the host's own VM list (HostSystem.vm), which is the order
+    # "Get-VM -Location <host>" returns them in; VMs not in that list go last, as read
     foreach ($h in $Hosts) {
-        foreach ($vm in $vmsByHostId[$h.Id]) { $vm }
+        $position = @{}
+        $index = 0
+        foreach ($vmRef in $h.ExtensionData.Vm) { $position["$($vmRef.Type)-$($vmRef.Value)"] = $index++ }
+
+        $ordered = [System.Collections.Generic.List[object]]::new($vmsByHostId[$h.Id])
+        $fallback = $ordered.Count + 1
+        $readOrder = @{}
+        for ($i = 0; $i -lt $ordered.Count; $i++) { $readOrder[$ordered[$i].Id] = $i }
+        $ordered.Sort([Comparison[object]] {
+            param($a, $b)
+            $pa = if ($position.ContainsKey($a.Id)) { $position[$a.Id] } else { $fallback + $readOrder[$a.Id] }
+            $pb = if ($position.ContainsKey($b.Id)) { $position[$b.Id] } else { $fallback + $readOrder[$b.Id] }
+            $pa.CompareTo($pb)
+        })
+        foreach ($vm in $ordered) { $vm }
     }
 }
 
