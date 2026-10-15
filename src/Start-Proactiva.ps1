@@ -96,20 +96,13 @@ while (-not $Frequency) {
 
 if (-not $ReportOnly) {
     $VCenters = @($VCenters -join ',' -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    while ($true) {
-        if ($VCenters.Count -eq 0) {
-            $VCenters = @((Read-Host "vCenters (separados por coma)") -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            continue
-        }
+    while ($VCenters.Count -eq 0) {
+        $VCenters = @((Read-Host "vCenters (separados por coma)") -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
 
-        # Azure VMware Solution is run by Microsoft: it is not collected
-        $avsVCenters = @($VCenters | Where-Object { Test-IsAvsVCenter $_ })
-        if ($avsVCenters.Count -gt 0) {
-            Write-Host "Se omiten los vCenters de Azure VMware Solution (los gestiona Microsoft): $($avsVCenters -join ', ')" -ForegroundColor Yellow
-            $VCenters = @($VCenters | Where-Object { -not (Test-IsAvsVCenter $_) })
-            continue
-        }
-        break
+    $avsVCenters = @($VCenters | Where-Object { Test-IsAvsVCenter $_ })
+    if ($avsVCenters.Count -gt 0) {
+        Write-Host "Azure VMware Solution ($($avsVCenters -join ', ')): lo gestiona Microsoft, se relevan solo las VMs." -ForegroundColor Yellow
     }
 }
 

@@ -1,5 +1,7 @@
 using module .\ProactivaCollector.psm1
 
+Import-Module (Join-Path $PSScriptRoot '..\shared\Exclusions.psm1')
+
 # Step 1 of the pipeline: connect to the vCenters and collect the data into JSON files.
 
 # Connects to every vCenter in $Servers (SOAP + CIS/REST).
@@ -106,10 +108,17 @@ function Invoke-ProactivaCollection {
         $server = $vcenter.Connection
         Write-Host "`nProcesando vCenter: $($vcenter.Name)"
 
+        # Azure VMware Solution: Microsoft runs everything except the VMs, so only those (and
+        # their snapshots) are collected: no alarm test, no hosts, no appliance, no vDS export
+        $isAvs = Test-IsAvsVCenter $vcenter.Name
+        if ($isAvs) {
+            Write-Host "`tvCenter de Azure VMware Solution: se relevan solo las VMs y sus snapshots (el resto lo gestiona Microsoft)." -ForegroundColor Yellow
+        }
+
         Write-Host "`tObteniendo objetos principales..."
         $hosts = Get-VMHost -Server $server
         $clusters = Get-Cluster -Server $server
-        $vdSwitches = Get-VDSwitch -Server $server
+        $vdSwitches = if ($isAvs) { @() } else { Get-VDSwitch -Server $server }
         $vmCount = @(Get-VM -Server $server).Count
         Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $vmCount VMs, $($vdSwitches.Count) vDS."
 
@@ -135,6 +144,12 @@ function Invoke-ProactivaCollection {
         Write-Progress -Activity "Recoleccion completa" -Completed
 
         Write-Host "`tProcesando reportes..."
+        if ($isAvs) {
+            $collector.CollectVms($allVms, $clusters, $allSnapshots)
+            $collector.CollectSnapshots($allSnapshots)
+            continue
+        }
+
         $collector.CollectAlarmTest([bool]$SkipAlarmTest)
         $collector.CollectVCenterSizing($allVms, $hosts)
         $collector.CollectBackupActivity()
@@ -166,6 +181,9 @@ function Invoke-DriverCollection {
     $collector = [ProactivaCollector]::new((Join-Path $PSScriptRoot 'reference-data'), $RunFolder)
 
     foreach ($vcenter in $VCenters) {
+        # The hosts of Azure VMware Solution are Microsoft's
+        if (Test-IsAvsVCenter $vcenter.Name) { continue }
+
         $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
         Write-Host "`nProcesando drivers del vCenter: $($vcenter.Name)"
 

@@ -90,7 +90,7 @@ function New-ProactivaReport {
 
     $avsVCenters = Get-AvsVCenters -Path $RawExcelPath
     if ($avsVCenters.Count -gt 0) {
-        Write-Host "Se excluyen del reporte los vCenters de Azure VMware Solution (los gestiona Microsoft): $($avsVCenters -join ', ')" -ForegroundColor Yellow
+        Write-Host "Azure VMware Solution ($($avsVCenters -join ', ')): lo gestiona Microsoft, del reporte solo se analizan sus VMs." -ForegroundColor Yellow
     }
 
     # One failing check must not take the whole report down: it is logged, its checklist rows
@@ -308,8 +308,11 @@ function Import-RawSheet {
 
     if (-not $Path -or -not (Test-Path $Path)) { return }
     try {
-        # Rows of Azure VMware Solution vCenters never reach a check (see Exclusions.psm1)
-        Import-Excel -Path $Path -WorksheetName $WorksheetName -ErrorAction Stop | Where-Object {
+        $rows = Import-Excel -Path $Path -WorksheetName $WorksheetName -ErrorAction Stop
+
+        # Of Azure VMware Solution only the VM-level sheets reach a check (see Exclusions.psm1)
+        if ($WorksheetName -in (Get-AvsSheets)) { return $rows }
+        $rows | Where-Object {
             $vcenter = if ($_.PSObject.Properties['vCenter']) { $_.vCenter } else { $_.'vCenter Server' }
             -not (Test-IsAvsVCenter $vcenter)
         }
