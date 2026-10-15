@@ -6,7 +6,7 @@ Recolección mucho más rápida. Las hojas, columnas, valores y el orden de las 
 
 | Cliente real (2 vCenters, trimestral) | v3.1.0 | v3.2.0 |
 |---|---|---|
-| Recolección completa | 6:04 | 2:07 |
+| Recolección completa (datos generales + drivers) | 6:04 | 2:08 |
 
 **Qué cambió**
 - El inventario se lee con pocas consultas grandes: todas las VMs (con placas de red e ISOs) en una sola consulta, y la configuración de los hosts de lo que ya trae `Get-VMHost` o con consultas por lotes, en vez de varias llamadas por objeto. Los snapshots se piden solo para las VMs que tienen.
@@ -15,6 +15,8 @@ Recolección mucho más rápida. Las hojas, columnas, valores y el orden de las 
 - La HCL de servidores de Broadcom se descarga en segundo plano mientras se lee el inventario.
 - El log muestra cuánto tardó cada etapa por vCenter, y al final de la corrida se resume la duración de recolección, conversión y anexo.
 - `src\tools\Compare-CollectionJson.ps1` compara los JSON de dos corridas hoja por hoja, para validar cambios en la recolección.
+- Como todo el inventario se lee de una vez, una VM que se mueve de host durante la corrida ya no puede figurar en un host en la hoja VM y en otro en vNetwork.
+- Las hojas del anexo que agrupan por cluster (ej. Host DNS) salen siempre en el mismo orden; antes cambiaba de una corrida a otra.
 
 **Limitaciones conocidas**
 - El orden de las filas de Standard Switch se verificó con hosts de un solo vSwitch; con varios vSwitch por host, los switches salen en el orden de la configuración del host.
