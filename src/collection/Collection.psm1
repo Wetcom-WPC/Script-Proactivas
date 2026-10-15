@@ -519,6 +519,7 @@ function Invoke-CollectionWorkers {
             $outputPath = Join-Path $exchangeFolder "output-$i.xml"
             if (Test-Path $outputPath) {
                 $outcome = Import-Clixml -Path $outputPath
+                Remove-ValueDecorations $outcome.Result
                 Write-WorkerLog $outcome.Log
                 [PSCustomObject]@{ Ok = [bool]$outcome.Ok; Result = $outcome.Result; Error = $outcome.Error }
             }
@@ -530,6 +531,24 @@ function Invoke-CollectionWorkers {
     finally {
         Get-Job | Where-Object { $_.State -eq 'Running' -and $jobs -contains $_ } | Stop-Job
         Remove-Item -Path $exchangeFolder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Values that come back from a worker keep the extra members PowerShell attached to them
+# (Get-Date adds DisplayHint), and ConvertTo-Json then writes a date as an object instead of
+# the plain text it writes in-process. Walks the result (report -> sheets -> rows) and leaves
+# every date plain.
+function Remove-ValueDecorations($value, [int] $depth = 0) {
+    if ($null -eq $value -or $depth -gt 4) { return }
+    if ($value -is [string] -or $value -is [ValueType]) { return }
+    if ($value -is [System.Collections.IList]) {
+        foreach ($item in $value) { Remove-ValueDecorations $item ($depth + 1) }
+        return
+    }
+    foreach ($property in $value.PSObject.Properties) {
+        if ($property.MemberType -ne 'NoteProperty') { continue }
+        if ($property.Value -is [datetime]) { $property.Value = [datetime]$property.Value.PSObject.BaseObject }
+        else { Remove-ValueDecorations $property.Value ($depth + 1) }
     }
 }
 

@@ -580,7 +580,7 @@ class ProactivaCollector {
             # Same data Get-VirtualSwitch -Standard / Get-VirtualPortGroup read, already in ExtensionData
             $network = $h.ExtensionData.Config.Network
             foreach ($standardSwitch in $network.Vswitch) {
-                foreach ($portGroup in ($network.Portgroup | Where-Object { $_.Spec.VswitchName -eq $standardSwitch.Name })) {
+                foreach ($portGroup in (Get-SortedPortGroups ($network.Portgroup | Where-Object { $_.Spec.VswitchName -eq $standardSwitch.Name }))) {
                     if ($null -ne $portGroup.Spec.VlanId) {
                         [void]$this.switchReport.Add([PSCustomObject] @{
                             vCenter   = $this.currentVCenter
@@ -1590,6 +1590,15 @@ function Get-VmInventory {
     foreach ($h in $Hosts) {
         foreach ($vm in $vmsByHostId[$h.Id]) { $vm }
     }
+}
+
+# Port groups by name in ordinal order (upper case before lower case), the order
+# Get-VirtualPortGroup returns them in
+function Get-SortedPortGroups($portGroups) {
+    $items = [System.Collections.Generic.List[object]]::new()
+    foreach ($portGroup in $portGroups) { $items.Add($portGroup) }
+    $items.Sort([Comparison[object]] { param($a, $b) [string]::CompareOrdinal([string]$a.Spec.Name, [string]$b.Spec.Name) })
+    return $items
 }
 
 # PowerCLI's name for a network card type (NetworkAdapter.Type), from its vSphere device class

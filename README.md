@@ -56,7 +56,7 @@ Si te equivocaste en el cliente, el mes o el tipo de proactiva, corré **`extra\
 
 ## 2. El flujo completo
 
-Todo corre en **un solo proceso y una sola ventana**, en tres etapas:
+Todo corre en **una sola ventana**, en tres etapas:
 
 ### 1. Recolección (`src\collection\`)
 
@@ -65,7 +65,7 @@ Se conecta a cada vCenter (SOAP + REST/CIS) y recorre hosts, clusters, VMs, data
 Para que tarde lo menos posible:
 
 - Lee el inventario con **pocas consultas grandes** (por ejemplo, todas las VMs con sus placas de red e ISOs en una sola consulta) en lugar de una por objeto.
-- Si hay **varios vCenters**, los recolecta **en paralelo**, cada uno en su propia sesión. El detalle de cada vCenter se muestra completo cuando termina.
+- Si hay **varios vCenters**, los recolecta **en paralelo**, cada uno en un proceso aparte con su propia sesión. El detalle de cada vCenter se muestra completo cuando termina.
 - Los **drivers/firmware** (esxcli, lento) se recolectan repartiendo los hosts entre varias tareas en paralelo.
 - La HCL de servidores de Broadcom se descarga en segundo plano mientras se lee el inventario.
 
