@@ -62,6 +62,18 @@ function Import-ServerHclCsv {
     }
 }
 
+# A model name reduced to what identifies the machine, so the HCL spelling and the one the
+# host reports in its BIOS compare equal: without the vendor prefix ("Lenovo System x3650 M5"
+# vs "System x3650 M5: -[8871AC1]-") and without the word "Certified" ("ThinkAgile VX7531
+# Certified Node" vs "ThinkAgile VX7531 Node").
+function Get-ModelKey {
+    param([string] $Model)
+
+    $key = $Model -replace '^\s*(Lenovo|IBM|HPE|HP|Dell( EMC)?|Cisco|Fujitsu|Hitachi|NEC|Supermicro)\s+', ''
+    $key = $key -replace '\bCertified\b', ''
+    return (($key -replace '\s+', ' ').Trim())
+}
+
 # Reference data for Test-HostHcl, loaded once per run: the server catalog (online, or the CSV
 # when the guide is not reachable) and the ESXi build list.
 function Get-HclReferenceData {
@@ -81,6 +93,10 @@ function Get-HclReferenceData {
         Write-Warning "No se pudo consultar el Broadcom Compatibility Guide ($($_.Exception.Message)). Se usa la copia local: $csvPath"
         $servers = @(Import-ServerHclCsv -Path $csvPath)
         $source = "CSV local ($((Get-Item $csvPath).LastWriteTime.ToString('yyyy-MM-dd')))"
+    }
+
+    foreach ($server in $servers) {
+        Add-Member -InputObject $server -NotePropertyName ModelKey -NotePropertyValue (Get-ModelKey $server.model) -Force
     }
 
     $script:hclReferenceData = [PSCustomObject]@{
@@ -150,6 +166,7 @@ function Test-HostHcl {
         ReleaseLevel      = Resolve-HostRelease -VMHost $VMHost -EsxiReleases $HclData.EsxiReleases
         Manufacturer      = $VMHost.Manufacturer
         IsNutanix         = ([string]$VMHost.Manufacturer -match 'Nutanix')
+        IsVirtual         = ([string]$VMHost.Manufacturer -match '^VMware')   # nested ESXi ("VMware7,1")
         Model             = $hostModel
         Cpu               = $hostCpu
         Supported         = $null
@@ -158,8 +175,15 @@ function Test-HostHcl {
         Note              = $null
     }
 
+    # Nested ESXi hosts run on a virtual machine: there is no server model to look up
+    if ($result.IsVirtual) {
+        $result.Note = "Host virtual (ESXi anidado): la HCL de servidores no aplica."
+        return $result
+    }
+
+    $hostKey = Get-ModelKey $hostModel
     $modelEntries = @($HclData.Servers | Where-Object {
-        $_.model -and ($hostModel -like ("*" + ($_.model -replace "IBM ", "") + "*"))
+        $_.ModelKey -and $hostKey.IndexOf($_.ModelKey, [StringComparison]::OrdinalIgnoreCase) -ge 0
     })
     if ($modelEntries.Count -eq 0) {
         $result.Supported = $false
@@ -168,8 +192,8 @@ function Test-HostHcl {
     }
 
     # Most specific model name first ("DL380 Gen10 Plus" over "DL380 Gen10")
-    $longestModel = ($modelEntries | Sort-Object { $_.model.Length } -Descending | Select-Object -First 1).model.Length
-    $modelEntries = @($modelEntries | Where-Object { $_.model.Length -eq $longestModel })
+    $longestModel = ($modelEntries | Sort-Object { $_.ModelKey.Length } -Descending | Select-Object -First 1).ModelKey.Length
+    $modelEntries = @($modelEntries | Where-Object { $_.ModelKey.Length -eq $longestModel })
 
     $cpuPattern = Get-CpuSeriesPattern -HostCpu $hostCpu
     $entries = if ($cpuPattern) { @($modelEntries | Where-Object { $_.cpuSeries -like $cpuPattern }) } else { $modelEntries }

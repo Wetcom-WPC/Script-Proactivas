@@ -8,31 +8,53 @@ Import-Module (Join-Path $PSScriptRoot '..\shared\ExcelStyle.psm1')
 . (Join-Path $PSScriptRoot 'checks\QuarterlyChecks.ps1')
 . (Join-Path $PSScriptRoot 'checks\SemiannualChecks.ps1')
 
-# Checks per frequency, in the order their sheets appear in the annex. Frequencies are
+# Checks per frequency, in the order their sheets appear in the annex, each with the checklist
+# IDs it fills (used to flag those rows when the check itself fails). Frequencies are
 # cumulative: a quarterly visit also runs the monthly checks, a semiannual one runs all three.
 $script:checksByFrequency = [ordered]@{
-    Monthly    = @(
-        'Test-VCenterSizing', 'Test-PartitionFreeSpace', 'Test-SyslogConfiguration', 'Test-MultipathPolicy',
-        'Test-EsxiVersionConsistency', 'Test-HostResourceConsistency', 'Test-VmNicAdapterType', 'Test-EsxiShellTimeout',
-        'Test-PowerManagementPolicy', 'Test-VmwareToolsStatus', 'Test-ConnectedIsos', 'Test-VmNicStartConnected',
-        'Test-Snapshots', 'Test-AlarmConfiguration'
-    )
-    Quarterly  = @(
-        'Test-EsxiEndOfSupport', 'Test-HardwareCompatibility', 'Test-NtpConfiguration', 'Test-HostDrivers',
-        'Test-DnsConfiguration', 'Test-Licenses', 'Test-NiocEnabled', 'Test-StandardSwitchConsistency',
-        'Test-VCenterRootPassword', 'Test-VCenterCertificates', 'Test-EsxiCertificates', 'Test-PerformanceStatistics'
-    )
-    Semiannual = @(
-        'Test-VamiBackup', 'Test-VdsBackup'
-    )
+    Monthly    = [ordered]@{
+        'Test-VCenterSizing'           = @('VSP-ME-01')
+        'Test-PartitionFreeSpace'      = @('VSP-ME-02')
+        'Test-SyslogConfiguration'     = @('VSP-ME-04')
+        'Test-MultipathPolicy'         = @('VSP-ME-05')
+        'Test-EsxiVersionConsistency'  = @('VSP-ME-06')
+        'Test-HostResourceConsistency' = @('VSP-ME-07')
+        'Test-VmNicAdapterType'        = @('VSP-ME-08')
+        'Test-EsxiShellTimeout'        = @('VSP-ME-12')
+        'Test-PowerManagementPolicy'   = @('VSP-ME-14')
+        'Test-VmwareToolsStatus'       = @('VSP-ME-15')
+        'Test-ConnectedIsos'           = @('VSP-ME-16')
+        'Test-VmNicStartConnected'     = @('VSP-ME-17')
+        'Test-Snapshots'               = @('VSP-ME-03', 'VSP-ME-18')
+        'Test-AlarmConfiguration'      = @('VSP-ME-13')
+    }
+    Quarterly  = [ordered]@{
+        'Test-EsxiEndOfSupport'            = @('VSP-TR-01')
+        'Test-HardwareCompatibility'       = @('VSP-TR-02')
+        'Test-NtpConfiguration'            = @('VSP-TR-03')
+        'Test-HostDrivers'                 = @('VSP-TR-04')
+        'Test-DnsConfiguration'            = @('VSP-TR-05')
+        'Test-Licenses'                    = @('VSP-TR-06')
+        'Test-NiocEnabled'                 = @('VSP-TR-11')
+        'Test-StandardSwitchConsistency'   = @('VSP-TR-12')
+        'Test-VCenterRootPassword'         = @('VSP-TR-09')
+        'Test-VCenterCertificates'         = @('VSP-TR-07')
+        'Test-EsxiCertificates'            = @('VSP-TR-08')
+        'Test-PerformanceStatistics'       = @('VSP-TR-10')
+    }
+    Semiannual = [ordered]@{
+        'Test-VamiBackup' = @('VSP-SE-02')
+        'Test-VdsBackup'  = @('VSP-SE-01')
+    }
 }
 
+# Check name -> checklist IDs, for the checks that belong to the frequency
 function Get-ChecksForFrequency {
     param([Parameter(Mandatory = $true)] [ValidateSet('Monthly', 'Quarterly', 'Semiannual')] [string] $Frequency)
 
-    $checks = @()
+    $checks = [ordered]@{}
     foreach ($level in $script:checksByFrequency.Keys) {
-        $checks += $script:checksByFrequency[$level]
+        foreach ($name in $script:checksByFrequency[$level].Keys) { $checks[$name] = $script:checksByFrequency[$level][$name] }
         if ($level -eq $Frequency) { break }
     }
     return $checks
@@ -65,10 +87,26 @@ function New-ProactivaReport {
     # would reopen the old file and add to it
     if (Test-Path $context.AnnexPath) { Remove-Item $context.AnnexPath -Force }
 
+    # One failing check must not take the whole report down: it is logged, its checklist rows
+    # are left blank with a note to review them by hand, and the other checks go on
     $results = @()
-    foreach ($check in (Get-ChecksForFrequency -Frequency $Frequency)) {
+    $failedChecks = @()
+    $checks = Get-ChecksForFrequency -Frequency $Frequency
+    foreach ($check in $checks.Keys) {
         Write-Host "  -> $check" -ForegroundColor DarkGray
-        $results += & $check $context
+        try {
+            $results += & $check $context
+        }
+        catch {
+            $failedChecks += $check
+            Write-Warning "El chequeo '$check' fallo y se omite: $($_.Exception.Message) (linea $($_.InvocationInfo.ScriptLineNumber) de $(Split-Path $_.InvocationInfo.ScriptName -Leaf))"
+            foreach ($id in $checks[$check]) {
+                $results += [PSCustomObject]@{ ID = $id; Resultado = $null; Detalle = "El chequeo automatico fallo ($($_.Exception.Message)); revisar manualmente. Detalle en el log." }
+            }
+        }
+    }
+    if ($failedChecks.Count -gt 0) {
+        Write-Host "ATENCION: $($failedChecks.Count) chequeos fallaron y quedaron en blanco en la checklist: $($failedChecks -join ', ')" -ForegroundColor Yellow
     }
 
     Update-Checklist -TemplatePath (Join-Path $PSScriptRoot 'templates\checklist-template.xlsx') -OutputPath $context.ChecklistPath -Results $results -Frequency $Frequency
@@ -266,6 +304,16 @@ function Import-RawSheet {
     try {
         Import-Excel -Path $Path -WorksheetName $WorksheetName -ErrorAction Stop
     } catch {}
+}
+
+# The "ESXi" sheet of the raw Excel without the virtual "hosts" that are not ESXi servers:
+# HCX mobility appliances (model "VMware Mobility Platform") are listed as hosts but have no
+# configuration data (no advanced settings, DNS, NTP...) and no meaning for the host checks.
+# The raw Excel keeps them; only the checks skip them.
+function Get-EsxiRows {
+    param([Parameter(Mandatory = $true)] $Context)
+
+    Import-RawSheet $Context.RawExcelPath "ESXi" | Where-Object { $_.Model -ne 'VMware Mobility Platform' }
 }
 
 # Appends a sheet to the annex with the Wetcom header style
