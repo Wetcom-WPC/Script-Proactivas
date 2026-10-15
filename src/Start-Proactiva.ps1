@@ -24,6 +24,10 @@ those are the only credentials tried and nothing is prompted. Meant for unattend
 Skips collection and conversion and regenerates the annex/checklist from an existing run
 (-RunFolder, or the most recent one). Useful to fix a typo in the client or month.
 
+.PARAMETER Sequential
+Collects everything in sequence. By default several vCenters, and the drivers of many hosts,
+are collected in parallel (one worker process each). Useful to debug or to compare results.
+
 .PARAMETER SkipAlarmTest
 Does not create the temporary "Falso Positivo" alarm in the vCenter (the only change the
 collection makes to the environment). The rest of the alarm audit still runs.
@@ -41,11 +45,12 @@ param(
     [string] $CredentialPath,
     [switch] $ReportOnly,
     [string] $RunFolder,
-    [switch] $SkipAlarmTest
+    [switch] $SkipAlarmTest,
+    [switch] $Sequential
 )
 
 $ErrorActionPreference = 'Continue'
-$global:APP_VERSION = "v3.1.0"
+$global:APP_VERSION = "v3.2.0"
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $runtimeModules = Join-Path $repoRoot 'runtime\Modules'
@@ -58,6 +63,11 @@ $frequencyLabels = [ordered]@{
 
 Import-Module (Join-Path $PSScriptRoot 'shared\RunFolder.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'shared\Exclusions.psm1') -Force
+
+# Duration as m:ss (shown in the final summary)
+function Format-StageDuration([TimeSpan] $Duration) {
+    return "{0}:{1:00}" -f [math]::Floor($Duration.TotalMinutes), $Duration.Seconds
+}
 
 # ---------------------------------------------------------------------------------------
 # Visit details: asked up front so the rest of the run is unattended
@@ -131,6 +141,8 @@ if ($SkipAlarmTest) { Write-Host "Prueba de alarmas (Falso Positivo): OMITIDA" -
 
 $exitCode = 0
 $connectedVCenters = @()
+$stageTimings = [ordered]@{}
+$stageStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
     Import-Module (Join-Path $runtimeModules 'ImportExcel') -ErrorAction Stop
@@ -147,6 +159,9 @@ try {
         }
         Set-PowerCLIConfiguration -Scope Session -ParticipateInCEIP $false -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
 
+        # Background download of the server HCL (thread job). Without it, it downloads when needed.
+        Import-Module (Join-Path $runtimeModules 'ThreadJob') -ErrorAction SilentlyContinue
+
         Import-Module (Join-Path $PSScriptRoot 'collection\Collection.psm1') -Force -WarningAction SilentlyContinue
 
         $credentials = $null
@@ -159,13 +174,15 @@ try {
         if ($connectedVCenters.Count -eq 0) { throw "No se pudo conectar a ningun vCenter." }
 
         $jsonFiles = @()
-        $jsonFiles += Invoke-ProactivaCollection -VCenters $connectedVCenters -RunFolder $runPath -SkipAlarmTest:$SkipAlarmTest
+        $jsonFiles += Invoke-ProactivaCollection -VCenters $connectedVCenters -RunFolder $runPath -SkipAlarmTest:$SkipAlarmTest -Sequential:$Sequential
         if ($Frequency -ne 'Monthly') {
-            $jsonFiles += Invoke-DriverCollection -VCenters $connectedVCenters -RunFolder $runPath
+            $jsonFiles += Invoke-DriverCollection -VCenters $connectedVCenters -RunFolder $runPath -Sequential:$Sequential
         }
 
         Disconnect-VCenters -VCenters $connectedVCenters
         $connectedVCenters = @()
+        $stageTimings['Recoleccion'] = $stageStopwatch.Elapsed
+        $stageStopwatch.Restart()
 
         # -------------------------------------------------------------------------------
         # 2. Conversion
@@ -176,6 +193,8 @@ try {
         foreach ($jsonFile in $jsonFiles) {
             [void](ConvertTo-RawExcel -JsonPath $jsonFile -ExcelFolder (Join-Path $runPath 'excel'))
         }
+        $stageTimings['Conversion a Excel'] = $stageStopwatch.Elapsed
+        $stageStopwatch.Restart()
     }
 
     # -----------------------------------------------------------------------------------
@@ -192,6 +211,7 @@ try {
 
     $report = New-ProactivaReport -RunFolder $runPath -RawExcelPath $rawExcel.FullName -DriverExcelPath $driverExcel.FullName `
         -Client $Client -Month $Month -Frequency $Frequency
+    $stageTimings['Anexo y Checklist'] = $stageStopwatch.Elapsed
 
     Write-Host "`n==========================================================" -ForegroundColor Green
     Write-Host " Proceso completado" -ForegroundColor Green
@@ -200,6 +220,7 @@ try {
     if ($Frequency -eq 'Semiannual' -and (Get-ChildItem (Join-Path $runPath 'vds_configuration') -Filter '*.zip' -ErrorAction SilentlyContinue)) {
         Write-Host " Recuerde subir al Drive los .zip de: $(Join-Path $runPath 'vds_configuration')" -ForegroundColor Yellow
     }
+    Write-Host " Tiempos:   $(($stageTimings.GetEnumerator() | ForEach-Object { "$($_.Key) $(Format-StageDuration $_.Value)" }) -join ' | ')" -ForegroundColor Green
     Write-Host "==========================================================" -ForegroundColor Green
 }
 catch {

@@ -1,4 +1,5 @@
-# Hardware compatibility (HCL) lookups for servers (TR-02), IO devices (TR-04) and vSAN.
+# Hardware compatibility (HCL) lookups for servers (TR-02). The IO device (TR-04) and vSAN
+# lookups are indexes built by ProactivaCollector (GetIoHclIndex / GetVsanHclIndex).
 #
 # Servers: the Broadcom Compatibility Guide "Systems / Servers" catalog. Downloaded in full on
 # every run from the same API the guide's website uses (https://compatibilityguide.broadcom.com,
@@ -62,6 +63,27 @@ function Import-ServerHclCsv {
     }
 }
 
+# Starts downloading the server catalog in the background (a thread job), so the download
+# overlaps with reading the inventory; Get-HclReferenceData picks the result up. Without the
+# ThreadJob module, Get-HclReferenceData simply downloads it when called.
+function Start-ServerHclDownload {
+    if ($script:hclReferenceData -or $script:serverHclJob) { return }
+    if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) { return }
+
+    $script:serverHclJob = Start-ThreadJob -ScriptBlock {
+        param($hardwareCompatibilityScript)
+        . $hardwareCompatibilityScript
+        Get-ServerHclOnline
+    } -ArgumentList (Join-Path $PSScriptRoot 'HardwareCompatibility.ps1')
+}
+
+# Hands this module the reference data already loaded elsewhere (parallel workers get the one
+# the main process downloaded, instead of downloading it again)
+function Set-HclReferenceData {
+    param([Parameter(Mandatory = $true)] $Data)
+    $script:hclReferenceData = $Data
+}
+
 # A model name reduced to what identifies the machine, so the HCL spelling and the one the
 # host reports in its BIOS compare equal: without the vendor prefix ("Lenovo System x3650 M5"
 # vs "System x3650 M5: -[8871AC1]-") and without the word "Certified" ("ThinkAgile VX7531
@@ -83,8 +105,17 @@ function Get-HclReferenceData {
 
     $csvPath = Join-Path $ReferenceDataFolder 'servers-hcl.csv'
     try {
-        Write-Host "`tDescargando la HCL de servidores de Broadcom..." -NoNewline
-        $servers = Get-ServerHclOnline
+        if ($script:serverHclJob) {
+            Write-Host "`tEsperando la descarga de la HCL de servidores de Broadcom..." -NoNewline
+            $job = $script:serverHclJob
+            $script:serverHclJob = $null
+            $servers = @(Receive-Job -Job $job -Wait -AutoRemoveJob -ErrorAction Stop)
+            if ($servers.Count -eq 0) { throw "La descarga no devolvio datos." }
+        }
+        else {
+            Write-Host "`tDescargando la HCL de servidores de Broadcom..." -NoNewline
+            $servers = Get-ServerHclOnline
+        }
         $source = "Broadcom Compatibility Guide (en linea, $(Get-Date -Format 'yyyy-MM-dd'))"
         Write-Host " OK ($($servers.Count) modelos)." -ForegroundColor Green
     }
@@ -102,7 +133,11 @@ function Get-HclReferenceData {
     $script:hclReferenceData = [PSCustomObject]@{
         Servers      = $servers
         Source       = $source
-        EsxiReleases = (Get-Content -Path (Join-Path $ReferenceDataFolder "esxiReleases.json") | ConvertFrom-Json).data.esxiReleases
+        EsxiReleases = (Get-Content -Path (Join-Path $ReferenceDataFolder "esxiReleases.json") -Raw | ConvertFrom-Json).data.esxiReleases
+        # Lookups already resolved (many hosts share model and build): model -> HCL entries,
+        # build -> release. Thread-safe, because parallel collections share this object.
+        ModelEntries = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+        Releases     = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new()
     }
     return $script:hclReferenceData
 }
@@ -163,7 +198,7 @@ function Test-HostHcl {
     $result = [PSCustomObject]@{
         VMHost            = $VMHost.Name
         Build             = $VMHost.Build
-        ReleaseLevel      = Resolve-HostRelease -VMHost $VMHost -EsxiReleases $HclData.EsxiReleases
+        ReleaseLevel      = $null
         Manufacturer      = $VMHost.Manufacturer
         IsNutanix         = ([string]$VMHost.Manufacturer -match 'Nutanix')
         IsVirtual         = ([string]$VMHost.Manufacturer -match '^VMware')   # nested ESXi ("VMware7,1")
@@ -175,25 +210,46 @@ function Test-HostHcl {
         Note              = $null
     }
 
+    # Release and model entries are cached in $HclData (when it has the caches, see
+    # Get-HclReferenceData): hosts of the same build / model give the same answer
+    $releaseKey = "$($VMHost.Build)|$($VMHost.Version)"
+    if ($null -ne $HclData.Releases -and $HclData.Releases.ContainsKey($releaseKey)) {
+        $result.ReleaseLevel = $HclData.Releases[$releaseKey]
+    }
+    else {
+        $result.ReleaseLevel = Resolve-HostRelease -VMHost $VMHost -EsxiReleases $HclData.EsxiReleases
+        if ($null -ne $HclData.Releases) { [void]$HclData.Releases.TryAdd($releaseKey, $result.ReleaseLevel) }
+    }
+
     # Nested ESXi hosts run on a virtual machine: there is no server model to look up
     if ($result.IsVirtual) {
         $result.Note = "Host virtual (ESXi anidado): la HCL de servidores no aplica."
         return $result
     }
 
+    # Model entries are cached in $HclData (when it has the cache, see Get-HclReferenceData):
+    # hosts of the same model give the same answer
     $hostKey = Get-ModelKey $hostModel
-    $modelEntries = @($HclData.Servers | Where-Object {
-        $_.ModelKey -and $hostKey.IndexOf($_.ModelKey, [StringComparison]::OrdinalIgnoreCase) -ge 0
-    })
+    if ($null -ne $HclData.ModelEntries -and $HclData.ModelEntries.ContainsKey($hostKey)) {
+        $modelEntries = @($HclData.ModelEntries[$hostKey])
+    }
+    else {
+        $modelEntries = @($HclData.Servers | Where-Object {
+            $_.ModelKey -and $hostKey.IndexOf($_.ModelKey, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        })
+        if ($modelEntries.Count -gt 0) {
+            # Most specific model name first ("DL380 Gen10 Plus" over "DL380 Gen10")
+            $longestModel = ($modelEntries | Sort-Object { $_.ModelKey.Length } -Descending | Select-Object -First 1).ModelKey.Length
+            $modelEntries = @($modelEntries | Where-Object { $_.ModelKey.Length -eq $longestModel })
+        }
+        if ($null -ne $HclData.ModelEntries) { [void]$HclData.ModelEntries.TryAdd($hostKey, $modelEntries) }
+    }
+
     if ($modelEntries.Count -eq 0) {
         $result.Supported = $false
         $result.Note = "Modelo no encontrado en la HCL. Fuente: $($HclData.Source)"
         return $result
     }
-
-    # Most specific model name first ("DL380 Gen10 Plus" over "DL380 Gen10")
-    $longestModel = ($modelEntries | Sort-Object { $_.ModelKey.Length } -Descending | Select-Object -First 1).ModelKey.Length
-    $modelEntries = @($modelEntries | Where-Object { $_.ModelKey.Length -eq $longestModel })
 
     $cpuPattern = Get-CpuSeriesPattern -HostCpu $hostCpu
     $entries = if ($cpuPattern) { @($modelEntries | Where-Object { $_.cpuSeries -like $cpuPattern }) } else { $modelEntries }
@@ -216,13 +272,4 @@ function Test-HostHcl {
         $result.Note = "Fuente: $($HclData.Source)"
     }
     return $result
-}
-
-# vSAN HCL link(s) for a storage controller, by PCI ids
-function Get-VsanHclLink($vid, $did, $svid, $ssid, $vsanHcl) {
-    foreach ($entry in $vsanHcl.data.controller) {
-        if (($vid -eq $entry.vid) -and ($did -eq $entry.did) -and ($svid -eq $entry.svid) -and ($ssid -eq $entry.ssid)) {
-            $entry.vcglink
-        }
-    }
 }

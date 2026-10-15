@@ -15,7 +15,7 @@ Este documento explica cómo correrlo, qué hace cada pieza y qué archivos qued
    - **Tipo de proactiva**: `1` Mensual, `2` Trimestral, `3` Semestral
    - **vCenters**, separados por coma
    - **Credenciales** de cada vCenter. Funciona como un llavero: si varios vCenters comparten credenciales, se piden una sola vez.
-3. A partir de ahí no hace falta tocar nada más. La recolección demora entre 15 minutos y 1 hora según el entorno.
+3. A partir de ahí no hace falta tocar nada más. Cuánto demora depende del tamaño del entorno; al final se muestra la duración de cada etapa, y el log detalla cuánto tardó cada parte de la recolección.
 4. Al terminar, los entregables quedan en `resultados\<fecha>\anexo\` (ver sección 4).
 
 Los tipos de proactiva son acumulativos: la **trimestral** incluye todo lo de la mensual, y la **semestral** incluye la trimestral y la mensual.
@@ -50,16 +50,26 @@ Si te equivocaste en el cliente, el mes o el tipo de proactiva, corré **`extra\
 | `-CredentialPath` | Carpeta con credenciales guardadas como `cred-*.xml` (`Get-Credential \| Export-Clixml`). Con esto no se pide nada por consola; pensado para pruebas o corridas desatendidas. Los archivos quedan cifrados con el usuario de Windows: solo ese usuario, en esa PC, puede leerlos. |
 | `-ReportOnly` | Regenera el anexo de una corrida existente (`-RunFolder "2026-10-13"`, o la más reciente) |
 | `-SkipAlarmTest` | No crea la alarma temporal de la prueba de Falso Positivo (ver sección 2) |
+| `-Sequential` | Recolecta todo en secuencia, sin paralelismo (ver sección 2). Útil para depurar o para comparar resultados |
 
 ---
 
 ## 2. El flujo completo
 
-Todo corre en **un solo proceso y una sola ventana**, en tres etapas:
+Todo corre en **una sola ventana**, en tres etapas:
 
 ### 1. Recolección (`src\collection\`)
 
 Se conecta a cada vCenter (SOAP + REST/CIS) y recorre hosts, clusters, VMs, datastores, switches, snapshots, certificados, licencias, alarmas, salud de estadísticas, backups del VAMI, etc. El resultado queda en `resultados\<fecha>\json\<fecha hora>_Proactiva.json`. En trimestrales y semestrales, además, recolecta los drivers/firmware de las placas de red y controladoras de cada host (`..._DriverInfo.json`).
+
+Para que tarde lo menos posible:
+
+- Lee el inventario con **pocas consultas grandes** (por ejemplo, todas las VMs con sus placas de red e ISOs en una sola consulta) en lugar de una por objeto.
+- Si hay **varios vCenters**, los recolecta **en paralelo**, cada uno en un proceso aparte con su propia sesión. El detalle de cada vCenter se muestra completo cuando termina.
+- Los **drivers/firmware** (esxcli, lento) se recolectan repartiendo los hosts entre varias tareas en paralelo.
+- La HCL de servidores de Broadcom se descarga en segundo plano mientras se lee el inventario.
+
+Si una tarea en paralelo falla, ese vCenter (o esos hosts) se vuelve a recolectar en secuencia. Con `-Sequential` no se usa paralelismo. Al terminar cada vCenter, el log muestra una tabla con cuánto tardó cada etapa.
 
 Todo lo que hace contra el vCenter es **de solo lectura**, con una excepción: la **prueba de Falso Positivo** (VSP-ME-13) crea una alarma temporal sobre un datastore que ejecuta el mismo script de alertas que ya tiene configurado el cliente, espera a que se dispare y la borra. Con `-SkipAlarmTest` se omite esa parte (el resto de la auditoría de alarmas se hace igual).
 
@@ -109,7 +119,8 @@ script-proactivas/
     │   └── templates/checklist-template.xlsx
     ├── shared/                   ← carpeta de corrida y estilo de Excel, usados por varias etapas
     └── tools/
-        └── Initialize-Workstation.ps1  (lo lanza extra\Preparar-Equipo.bat)
+        ├── Initialize-Workstation.ps1  (lo lanza extra\Preparar-Equipo.bat)
+        └── Compare-CollectionJson.ps1  compara los JSON de dos corridas (validar cambios en la recolección)
 ```
 
 El código (nombres de archivos, funciones, variables y comentarios) está en inglés. Lo que ve el técnico (mensajes de consola) y los entregables (nombres de hojas, textos de la checklist) están en español.

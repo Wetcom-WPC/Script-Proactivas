@@ -373,15 +373,18 @@ function Export-AnnexSheet {
 }
 
 # ESXi hosts grouped by "vCenter|Cluster" (hosts without cluster are left out).
-# Returns a hashtable; iterate its .Values to get each cluster's hosts.
+# Returns an ordered dictionary (clusters in the order of their first host); iterate its
+# .Values to get each cluster's hosts.
 function Get-HostsByCluster {
     param([object[]] $Hosts)
 
-    $groups = @{}
+    # Ordered, so clusters come out in the order of their first host: a plain hashtable's order
+    # changes from one run to the next (.NET randomizes string hashes per process)
+    $groups = [ordered]@{}
     foreach ($row in $Hosts) {
         if ($null -ne $row -and -not [string]::IsNullOrEmpty($row.Cluster) -and -not [string]::IsNullOrEmpty($row.vCenter)) {
             $key = "$($row.vCenter.Trim())|$($row.Cluster.Trim())"
-            if (-not $groups.ContainsKey($key)) { $groups[$key] = @() }
+            if (-not $groups.Contains($key)) { $groups[$key] = @() }
             $groups[$key] += $row
         }
     }

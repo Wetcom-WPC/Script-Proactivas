@@ -32,8 +32,22 @@ class ProactivaCollector {
 
     [PSCustomObject[]] $toolsRefJson
     [PSCustomObject] $vCenterSizing
-    [PSCustomObject[]] $vsanHcl
+    [PSCustomObject] $vsanHcl = $null
     [PSCustomObject] $ioHclRef = $null
+    [hashtable] $ioHclIndex = $null
+    [hashtable] $vsanHclIndex = $null
+
+    # Where each host of the current vCenter lives, by host Id ("HostSystem-host-12"), built
+    # once per vCenter by SetHostLocations() instead of asking Get-Cluster/Get-Datacenter per object
+    [hashtable] $clusterByHostId = @{}
+    [hashtable] $datacenterByHostId = @{}
+    $currentClusters = $null
+
+    # Every datastore of the current vCenter (Get-Datastore, read once by SetDatastores)
+    $currentDatastores = $null
+
+    # Every datastore name already listed in the Datastores sheet (vSAN ones are listed once)
+    [System.Collections.Generic.HashSet[string]] $listedDatastores = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # Annotations that identify the vCenter Server appliance VM
     [String[]] $vcsaAnnotations = @("VMware vCenter Server Appliance")
@@ -66,15 +80,69 @@ class ProactivaCollector {
     ProactivaCollector([string] $referenceDataFolder, [string] $runFolder) {
         $this.ReferenceDataFolder = $referenceDataFolder
         $this.RunFolder = $runFolder
-        $this.toolsRefJson = Get-Content -Path (Join-Path $referenceDataFolder "vmtools-ref.json") | ConvertFrom-Json
-        $this.vCenterSizing = Get-Content -Path (Join-Path $referenceDataFolder "vcenter-sizing.json") | ConvertFrom-Json
-        $this.vsanHcl = Get-Content -Path (Join-Path $referenceDataFolder "vsan-hcl.json") | ConvertFrom-Json
+        $this.toolsRefJson = Get-Content -Path (Join-Path $referenceDataFolder "vmtools-ref.json") -Raw | ConvertFrom-Json
+        $this.vCenterSizing = Get-Content -Path (Join-Path $referenceDataFolder "vcenter-sizing.json") -Raw | ConvertFrom-Json
+        # vsan-hcl.json (~21 MB) and the IO HCL are only needed for the drivers: loaded on first use
     }
 
     SetCurrentVCenter($connection, $cisConnection) {
         $this.currentConnection = $connection
         $this.currentCisConnection = $cisConnection
         $this.currentVCenter = $connection.Name
+        $this.clusterByHostId = @{}
+        $this.datacenterByHostId = @{}
+        $this.currentClusters = $null
+        $this.currentDatastores = $null
+    }
+
+    # Every datastore of the current vCenter, shared by the alarm test and CollectDatastores
+    SetDatastores($datastores) {
+        $this.currentDatastores = @($datastores)
+    }
+
+    # Datastores of the current vCenter: the ones given to SetDatastores, or a fresh query
+    [object[]] GetDatastores() {
+        if ($null -eq $this.currentDatastores) { $this.currentDatastores = @(Get-Datastore -Server $this.currentVCenter) }
+        return $this.currentDatastores
+    }
+
+    # Maps every host of the current vCenter to its cluster and datacenter, so the Collect*
+    # methods do not need a Get-Cluster / Get-Datacenter call per host, VM or network card
+    SetHostLocations($clusters) {
+        $this.currentClusters = $clusters
+        foreach ($cluster in $clusters) {
+            foreach ($hostRef in $cluster.ExtensionData.Host) {
+                $this.clusterByHostId["$($hostRef.Type)-$($hostRef.Value)"] = $cluster.Name
+            }
+        }
+
+        try {
+            foreach ($datacenter in (Get-View -ViewType Datacenter -Property Name -Server $this.currentVCenter -ErrorAction Stop)) {
+                foreach ($hostView in (Get-View -ViewType HostSystem -Property Name -SearchRoot $datacenter.MoRef -Server $this.currentVCenter -ErrorAction Stop)) {
+                    $this.datacenterByHostId["$($hostView.MoRef.Type)-$($hostView.MoRef.Value)"] = $datacenter.Name
+                }
+            }
+        }
+        catch {
+            # Hosts left out of the map fall back to Get-Datacenter (see GetDatacenterName)
+        }
+    }
+
+    [object] GetClusterName($vmHost) {
+        return $this.clusterByHostId[$vmHost.Id]
+    }
+
+    [object] GetDatacenterName($vmHost) {
+        if ($this.datacenterByHostId.ContainsKey($vmHost.Id)) { return $this.datacenterByHostId[$vmHost.Id] }
+        return ($vmHost | Get-Datacenter).Name
+    }
+
+    # Adds a row to the Datastores sheet and remembers its datastore name(s)
+    AddDatastoreRow([PSCustomObject] $row) {
+        [void]$this.datastoreReport.Add($row)
+        foreach ($name in @($row.Datastore)) {
+            if ($null -ne $name) { [void]$this.listedDatastores.Add([string]$name) }
+        }
     }
 
     CollectEsxi($hosts) {
@@ -82,6 +150,12 @@ class ProactivaCollector {
         Write-Host "`tProcesando ESXi..." -NoNewline
 
         $serverContext = $this.currentVCenter
+
+        # Advanced settings and certificates of every reachable host in a few bulk queries;
+        # the rest of the host configuration comes from the ExtensionData Get-VMHost already read
+        $reachableHosts = @($hosts | Where-Object { @("Connected", "Maintenance") -contains $_.ConnectionState })
+        $settingsByHostId = $this.GetAdvancedSettings($reachableHosts)
+        $certManagerByHostId = $this.GetCertificateManagers($reachableHosts)
 
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
@@ -100,39 +174,36 @@ class ProactivaCollector {
             }
 
             if (@("Connected", "Maintenance") -contains $h.ConnectionState) {
-                $advancedSettings = $h | Get-AdvancedSetting
+                # Name -> value, case-insensitive like the -eq it replaces. Hosts whose bulk query
+                # failed are read one by one, as before.
+                $advancedSettings = $settingsByHostId[$h.Id]
+                if ($null -eq $advancedSettings) {
+                    $advancedSettings = New-SettingDictionary ($h | Get-AdvancedSetting)
+                }
 
-                $shellTimeoutSetting = $advancedSettings | Where-Object { $_.name -eq 'UserVars.ESXIShellTimeOut' }
-                $shellTimeout = if ($shellTimeoutSetting) { $shellTimeoutSetting.Value } else { $null }
+                $shellTimeout = $advancedSettings['UserVars.ESXIShellTimeOut']
+                $interactiveTimeout = $advancedSettings['UserVars.ESXIShellinteractiveTimeOut']
+                $syslogLogDir = $advancedSettings['Syslog.global.logDir']
+                $syslogLogHost = $advancedSettings['Syslog.global.logHost']
 
-                $interactiveTimeoutSetting = $advancedSettings | Where-Object { $_.name -eq 'UserVars.ESXIShellinteractiveTimeOut' }
-                $interactiveTimeout = if ($interactiveTimeoutSetting) { $interactiveTimeoutSetting.Value } else { $null }
-
-                $logDirSetting = $advancedSettings | Where-Object { $_.name -eq 'Syslog.global.logDir' }
-                $syslogLogDir = if ($logDirSetting) { $logDirSetting.Value } else { $null }
-
-                $logHostSetting = $advancedSettings | Where-Object { $_.name -eq 'Syslog.global.logHost' }
-                $syslogLogHost = if ($logHostSetting) { $logHostSetting.Value } else { $null }
-
-                $ntpService = $h | Get-VMHostService | Where-Object { $_.key -eq "ntpd" }
+                # Same data Get-VMHostService / Get-VMHostNtpServer read, already in ExtensionData
+                $ntpService = $h.ExtensionData.Config.Service.Service | Where-Object { $_.Key -eq "ntpd" }
                 $ntpdRunning = if ($ntpService) { $ntpService.Running.ToString() } else { "Not Available" }
 
-                $ntpServers = ""
-                try {
-                    $ntpServers = ($h | Get-VMHostNtpServer -ErrorAction Stop) -join ","
-                }
-                catch {
-                    $ntpServers = ""
-                }
+                $ntpServers = @($h.ExtensionData.Config.DateTimeInfo.NtpConfig.Server) -join ","
 
                 $certValidTo = $null
                 $certStatus = "Unknown"
                 $certIssuer = ""
 
                 try {
-                    # -Server makes sure the certificate manager is read from this vCenter
                     if ($h.ExtensionData.ConfigManager.CertificateManager) {
-                        $certManager = Get-View -Id $h.ExtensionData.ConfigManager.CertificateManager -Server $serverContext -ErrorAction Stop
+                        # From the bulk query; one by one only if it failed. -Server makes sure
+                        # the certificate manager is read from this vCenter
+                        $certManager = $certManagerByHostId[$h.Id]
+                        if ($null -eq $certManager) {
+                            $certManager = Get-View -Id $h.ExtensionData.ConfigManager.CertificateManager -Server $serverContext -ErrorAction Stop
+                        }
 
                         if ($certManager.CertificateInfo) {
                             $certInfo = $certManager.CertificateInfo
@@ -173,12 +244,12 @@ class ProactivaCollector {
                 $certIssuer = ""
             }
 
-            $this.esxiReport += [PSCustomObject] @{
+            [void]$this.esxiReport.Add([PSCustomObject] @{
                 vCenter                     = $this.currentVCenter
                 Hostname                    = $h.Name
                 Model                       = $hclResult.Model
-                Datacenter                  = ($h | Get-Datacenter).Name
-                Cluster                     = ($h | Get-Cluster).Name
+                Datacenter                  = $this.GetDatacenterName($h)
+                Cluster                     = $this.GetClusterName($h)
                 ESXiVersion                 = $h.ExtensionData.Summary.Config.Product.FullName
                 ConnectionState             = $h.ConnectionState.ToString()
                 MemoryGB                    = [math]::Round($h.MemoryTotalGB, 3)
@@ -202,8 +273,59 @@ class ProactivaCollector {
                 "Supported Releases"        = $hclResult.SupportedReleases -join ","
                 Note                        = if ($hclResult.IsNutanix) { "Host Nutanix: validacion manual contra la Nutanix Compatibility & Interoperability Matrix. Referencia Broadcom: $($hclResult.Note)" } else { $hclResult.Note }
                 Reference                   = $hclResult.Reference
+            })
+        }
+    }
+
+    # Advanced settings of the given hosts, by host Id, as name -> value dictionaries. One
+    # Get-View per batch of hosts instead of one Get-AdvancedSetting per host; hosts of a batch
+    # that fails are left out (the caller reads them one by one).
+    [hashtable] GetAdvancedSettings($hosts) {
+        $settingsByHostId = @{}
+        $hostIdByManager = @{}
+        foreach ($h in $hosts) {
+            $managerRef = $h.ExtensionData.ConfigManager.AdvancedOption
+            if ($managerRef) { $hostIdByManager["$($managerRef.Type)-$($managerRef.Value)"] = @{ HostId = $h.Id; Ref = $managerRef } }
+        }
+
+        $managers = @($hostIdByManager.Values)
+        $batchSize = 20
+        for ($start = 0; $start -lt $managers.Count; $start += $batchSize) {
+            $batch = @($managers[$start..([math]::Min($start + $batchSize, $managers.Count) - 1)])
+            try {
+                foreach ($view in (Get-View -Id @($batch | ForEach-Object { $_.Ref }) -Property Setting -Server $this.currentVCenter -ErrorAction Stop)) {
+                    $entry = $hostIdByManager["$($view.MoRef.Type)-$($view.MoRef.Value)"]
+                    if ($entry) { $settingsByHostId[$entry.HostId] = New-SettingDictionary $view.Setting }
+                }
+            }
+            catch {
+                # Left out: read with Get-AdvancedSetting
             }
         }
+        return $settingsByHostId
+    }
+
+    # CertificateManager views (with CertificateInfo) of the given hosts, by host Id, in one
+    # Get-View. If it fails the result is empty and the caller asks host by host.
+    [hashtable] GetCertificateManagers($hosts) {
+        $managerByHostId = @{}
+        $hostIdByManager = @{}
+        foreach ($h in $hosts) {
+            $managerRef = $h.ExtensionData.ConfigManager.CertificateManager
+            if ($managerRef) { $hostIdByManager["$($managerRef.Type)-$($managerRef.Value)"] = @{ HostId = $h.Id; Ref = $managerRef } }
+        }
+        if ($hostIdByManager.Count -eq 0) { return $managerByHostId }
+
+        try {
+            foreach ($view in (Get-View -Id @($hostIdByManager.Values | ForEach-Object { $_.Ref }) -Property CertificateInfo -Server $this.currentVCenter -ErrorAction Stop)) {
+                $entry = $hostIdByManager["$($view.MoRef.Type)-$($view.MoRef.Value)"]
+                if ($entry) { $managerByHostId[$entry.HostId] = $view }
+            }
+        }
+        catch {
+            # Empty: read host by host
+        }
+        return $managerByHostId
     }
 
     # Network cards and storage controllers of every host, matched against the IO HCL.
@@ -213,12 +335,13 @@ class ProactivaCollector {
         Write-Host "`tProcesando drivers (ESXi IO)..." -NoNewline
         $vmHosts = $hosts | Where-Object { @("Connected", "Maintenance") -contains $_.ConnectionState }
         $devices = @($vmHosts | Get-VMHostPciDevice | Where-Object { $_.DeviceClass -eq "MassStorageController" -or $_.DeviceClass -eq "NetworkController" -or $_.DeviceClass -eq "SerialBusController" })
-        $hclDevices = $this.GetIoHclReference().data.ioDevices
+        $hclIndex = $this.GetIoHclIndex()
 
-        # esxcli results are per host; cache them instead of asking again for every device
+        # esxcli and HBA results are per host; cache them instead of asking again for every device
         $esxcliByHost = @{}
         $nicListByHost = @{}
         $vibListByHost = @{}
+        $hbasByHost = @{}
 
         for ($count = 0; $count -lt $devices.length; $count++) {
             Show-Progress $devices.length ($count + 1)
@@ -232,7 +355,7 @@ class ProactivaCollector {
             $svid = [String]::Format("{0:x4}", $device.SubVendorId)
             $ssid = [String]::Format("{0:x4}", $device.SubDeviceId)
 
-            $hclEntry = $hclDevices | Where-Object { $_.vid -eq $vid -and $_.did -eq $did -and $_.svid -eq $svid -and $_.ssid -eq $ssid } | Select-Object -First 1
+            $hclEntry = $hclIndex["$vid`:$did`:$svid`:$ssid"]
             $hclUrl = if ($hclEntry) { $hclEntry.url } else { "No encontrado en HCL" }
             $hclReleases = if ($hclEntry) { $hclEntry.releases -join "," } else { "" }
 
@@ -247,7 +370,7 @@ class ProactivaCollector {
 
                 $nicDetail = $esxcli.network.nic.get.Invoke(@{ nicname = $nicData.Name })
 
-                $this.nicReport += [PSCustomObject] @{
+                [void]$this.nicReport.Add([PSCustomObject] @{
                     "vCenter"                 = $this.currentVCenter
                     "Hostname"                = $device.VMHost.name
                     "Placa"                   = $nicData.Name
@@ -261,18 +384,19 @@ class ProactivaCollector {
                     "ESXi Supported Releases" = $hclReleases
                     "URL"                     = $hclUrl
                     "vSAN Compatibility"      = $null
-                }
+                })
             }
             else {
-                $hbaData = $device.VMHost | Get-VMHostHba -ErrorAction SilentlyContinue | Where-Object { $_.PCI -like '*' + $device.Id }
+                if (-not $hbasByHost.ContainsKey($hostName)) { $hbasByHost[$hostName] = @($device.VMHost | Get-VMHostHba -ErrorAction SilentlyContinue) }
+                $hbaData = $hbasByHost[$hostName] | Where-Object { $_.PCI -like '*' + $device.Id }
                 if (-not $hbaData) { continue }
 
                 $vibName = $hbaData.Driver -replace "_", "-"
                 if (-not $vibListByHost.ContainsKey($hostName)) { $vibListByHost[$hostName] = $esxcli.software.vib.list.Invoke() }
                 $driverVersion = ($vibListByHost[$hostName] | Where-Object { $_.Name -match "^(scsi-|sata-|)$vibName" }).Version -join ", "
-                $vsanCompatibility = Get-VsanHclLink $vid $did $svid $ssid $this.vsanHcl
+                $vsanCompatibility = $this.GetVsanHclIndex()["$vid`:$did`:$svid`:$ssid"]
 
-                $this.nicReport += [PSCustomObject] @{
+                [void]$this.nicReport.Add([PSCustomObject] @{
                     "vCenter"                 = $this.currentVCenter
                     "Hostname"                = $device.VMHost.name
                     "Placa"                   = $hbaData.Device
@@ -286,43 +410,46 @@ class ProactivaCollector {
                     "ESXi Supported Releases" = $hclReleases
                     "URL"                     = $hclUrl
                     "vSAN Compatibility"      = $vsanCompatibility -join ","
-                }
+                })
             }
         }
     }
 
+    # $vms come from Get-VmInventory: their network cards and ISOs are already part of each VM
     CollectVms($vms, $clusters, $snapshots) {
         $vms = $vms | ForEach-Object { $_ }
 
         Write-Host "`tProcesando placas de red de VMs..." -NoNewline
-        $connectedIsos = $vms | Get-CDDrive | Where-Object { $null -ne $_.IsoPath }
-        $allNetworkAdapters = $vms | Get-NetworkAdapter
+        $allNetworkAdapters = @($vms | ForEach-Object { $_.NetworkAdapters })
         $this.CollectVmNetwork($allNetworkAdapters)
+
+        # Snapshots grouped by VM once, instead of a Where-Object over all of them for every VM
+        $snapshotsByVm = Group-ById $snapshots { param($snapshot) $snapshot.VM.Id }
 
         Write-Host "`tProcesando VMs..." -NoNewline
         for ($count = 0; $count -lt $vms.Count; $count++) {
             $vm = $vms[$count]
             Show-Progress $vms.Count ($count + 1)
-            $networkAdapters = $allNetworkAdapters | Where-Object { $_.ParentId -eq $vm.Id }
-            $nicCount = $networkAdapters.length
+            $networkAdapters = $vm.NetworkAdapters
+            $nicCount = $networkAdapters.Count
             $toolsRequiredVersion = $this.GetToolsReference($vm.VMHost)
-            $this.vmReport += [PSCustomObject]@{
+            [void]$this.vmReport.Add([PSCustomObject]@{
                 vCenter              = $this.currentVCenter
                 VM                   = $vm.Name
-                Cluster              = ($clusters | Where-Object { $_.ExtensionData.Host -contains $vm.VMHost.Id }).name
+                Cluster              = $this.GetClusterName($vm.VMHost)
                 Host                 = $vm.VMHost.name
                 ConnectionState      = $vm.ExtensionData.Runtime.ConnectionState.ToString()
                 State                = $vm.PowerState.ToString()
                 vCPU                 = $vm.NumCpu
                 "Memory MB"          = $vm.MemoryMB
                 HardwareVersion      = $vm.HardwareVersion
-                Snapshots            = ($snapshots | Where-Object { $_.VM -eq $vm }).length
+                Snapshots            = if ($snapshotsByVm[$vm.Id]) { $snapshotsByVm[$vm.Id].Count } else { 0 }
                 ToolsStatus          = try { $vm.ExtensionData.Guest.ToolsStatus.ToString() } Catch { "VM has not been scanned" };
                 ToolsVersion         = $vm.ExtensionData.Guest.ToolsVersion
                 ToolsRequiredVersion = $toolsRequiredVersion
                 "SO (vCenter)"       = $vm.ExtensionData.Config.GuestFullName
                 "SO (Tools)"         = $vm.ExtensionData.Guest.GuestFullName
-                IsoConnected         = ($connectedIsos | Where-Object { $_.ParentId -eq $vm.Id }).IsoPath
+                IsoConnected         = Get-SingleOrArray $vm.IsoPaths
                 Adapter_01           = if ($nicCount -gt 0) { $networkAdapters[0].Type.ToString() } else { "" }
                 Adapter_02           = if ($nicCount -gt 1) { $networkAdapters[1].Type.ToString() } else { "" }
                 Adapter_03           = if ($nicCount -gt 2) { $networkAdapters[2].Type.ToString() } else { "" }
@@ -333,7 +460,7 @@ class ProactivaCollector {
                 Adapter_08           = if ($nicCount -gt 7) { $networkAdapters[7].Type.ToString() } else { "" }
                 Adapter_09           = if ($nicCount -gt 8) { $networkAdapters[8].Type.ToString() } else { "" }
                 Adapter_10           = if ($nicCount -gt 9) { $networkAdapters[9].Type.ToString() } else { "" }
-            }
+            })
         }
     }
 
@@ -341,16 +468,17 @@ class ProactivaCollector {
         for ($count = 0; $count -lt $allNetworkAdapters.length; $count++) {
             Show-Progress $allNetworkAdapters.length ($count + 1)
             $networkAdapter = $allNetworkAdapters[$count]
-            $this.vNetworkReport += [PSCustomObject]@{
+            [void]$this.vNetworkReport.Add([PSCustomObject]@{
                 vCenter         = $this.currentVCenter
                 VM              = $networkAdapter.Parent.Name
-                Cluster         = ($networkAdapter.Parent.VMHost | Get-Cluster).Name
+                Cluster         = $this.GetClusterName($networkAdapter.Parent.VMHost)
                 Host            = $networkAdapter.Parent.VMHost.Name
-                Status          = $networkAdapter.Parent.PowerState
+                # PowerCLI's PowerState enum as its number (what the JSON always had)
+                Status          = [int]$networkAdapter.Parent.PowerState
                 Mac             = $networkAdapter.MacAddress
                 Connected       = if ($networkAdapter.ConnectionState.Connected) { "True" } else { "False" }
                 StartsConnected = if ($networkAdapter.ConnectionState.StartConnected) { "True" } else { "False" }
-            }
+            })
         }
     }
 
@@ -375,7 +503,7 @@ class ProactivaCollector {
                 $productName = $licenseProperties | Where-Object { $_.Key -eq 'ProductName' } | Select-Object -ExpandProperty Value
                 $productVersion = $licenseProperties | Where-Object { $_.Key -eq 'ProductVersion' } | Select-Object -ExpandProperty Value
 
-                $this.licenseReport += [PSCustomObject]@{
+                [void]$this.licenseReport.Add([PSCustomObject]@{
                     Name           = $license.Name
                     LicenseKey     = $license.LicenseKey
                     ExpirationDate = $expirationDate
@@ -386,7 +514,7 @@ class ProactivaCollector {
                     Used           = $license.Used
                     CostUnit       = $license.CostUnit
                     vCenter        = $this.currentVCenter
-                }
+                })
             }
         }
     }
@@ -394,17 +522,22 @@ class ProactivaCollector {
     CollectDatastores($hosts) {
         Write-Host "`tProcesando datastores..." -NoNewline
 
+        # Every datastore once, then each host's own from its ExtensionData.Datastore list (the
+        # list "$h | Get-Datastore" reads); its LUNs come from ExtensionData too
+        $datastoresById = @{}
+        foreach ($datastore in $this.GetDatastores()) { $datastoresById[$datastore.Id] = $datastore }
+
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
             $h = $hosts[$count]
             $esxName = $h.Name
 
-            $allDatastores = $h | Get-Datastore
+            $allDatastores = @($h.ExtensionData.Datastore | ForEach-Object { $datastoresById["$($_.Type)-$($_.Value)"] } | Where-Object { $_ })
             $vmfsDatastores = $allDatastores | Where-Object { $_.Type -ne "vsan" }
-            $hostView = Get-View -Id $h.Id -Property Name, Config.StorageDevice -Server $this.currentVCenter
+            $storageDevice = $h.ExtensionData.Config.StorageDevice
 
-            foreach ($lun in $hostView.Config.StorageDevice.MultipathInfo.Lun) {
-                $scsiLun = $hostView.Config.StorageDevice.ScsiLun | Where-Object { $_.Key -eq $lun.Lun }
+            foreach ($lun in $storageDevice.MultipathInfo.Lun) {
+                $scsiLun = $storageDevice.ScsiLun | Where-Object { $_.Key -eq $lun.Lun }
                 $canonicalName = $scsiLun.CanonicalName
                 $datastore = ($vmfsDatastores | Where-Object { ($_.extensiondata.info.vmfs.extent | Select-Object -expand diskname) -like $canonicalName }).name
 
@@ -414,25 +547,25 @@ class ProactivaCollector {
                     elseif ($lun.Policy.Policy -match "_RR") { "RoundRobin" }
                     else { "Unknown" }
 
-                    $this.datastoreReport += [PSCustomObject] @{
+                    $this.AddDatastoreRow([PSCustomObject] @{
                         vCenter   = $this.currentVCenter
                         Hostname  = $esxName
                         Datastore = $datastore
                         Policy    = $policy
-                    }
+                    })
                 }
             }
 
             # vSAN datastores have no LUNs nor multipath policies; list them once so the sheet is complete
             $vsanDatastores = $allDatastores | Where-Object { $_.Type -eq "vsan" }
             foreach ($vsanDatastore in $vsanDatastores) {
-                if (-not ($this.datastoreReport | Where-Object { $_.Datastore -eq $vsanDatastore.Name })) {
-                    $this.datastoreReport += [PSCustomObject] @{
+                if (-not $this.listedDatastores.Contains($vsanDatastore.Name)) {
+                    $this.AddDatastoreRow([PSCustomObject] @{
                         vCenter   = $this.currentVCenter
                         Hostname  = $esxName
                         Datastore = $vsanDatastore.Name
                         Policy    = "vSAN"
-                    }
+                    })
                 }
             }
         }
@@ -443,18 +576,20 @@ class ProactivaCollector {
         for ($count = 0; $count -lt $hosts.length; $count++) {
             Show-Progress $hosts.length ($count + 1)
             $h = $hosts[$count]
-            $cluster = ($h | Get-Cluster).Name
-            foreach ($standardSwitch in ($h | Get-VirtualSwitch -Standard)) {
-                foreach ($portGroup in ($standardSwitch | Get-VirtualPortGroup)) {
-                    if ($null -ne $portGroup.vLanId) {
-                        $this.switchReport += [PSCustomObject] @{
+            $cluster = $this.GetClusterName($h)
+            # Same data Get-VirtualSwitch -Standard / Get-VirtualPortGroup read, already in ExtensionData
+            $network = $h.ExtensionData.Config.Network
+            foreach ($standardSwitch in $network.Vswitch) {
+                foreach ($portGroup in (Get-SortedPortGroups ($network.Portgroup | Where-Object { $_.Spec.VswitchName -eq $standardSwitch.Name }))) {
+                    if ($null -ne $portGroup.Spec.VlanId) {
+                        [void]$this.switchReport.Add([PSCustomObject] @{
                             vCenter   = $this.currentVCenter
                             ESXi      = $h.name
                             Cluster   = $cluster
-                            PortGroup = $portGroup.Name
+                            PortGroup = $portGroup.Spec.Name
                             Switch    = $standardSwitch.Name
-                            vLAN      = $portGroup.vLanId
-                        }
+                            vLAN      = $portGroup.Spec.VlanId
+                        })
                     }
                 }
             }
@@ -468,13 +603,13 @@ class ProactivaCollector {
         for ($count = 0; $count -lt $snapshots.Count; $count++) {
             Show-Progress $snapshots.Count ($count + 1)
             $snapshot = $snapshots[$count]
-            $this.snapshotReport += [PSCustomObject] @{
+            [void]$this.snapshotReport.Add([PSCustomObject] @{
                 vCenter  = $this.currentVCenter
                 VM       = $snapshot.VM.Name
                 Snapshot = $snapshot.Name
                 Fecha    = ($snapshot.Created | Get-Date -Format "yyyy-MM-dd HH:mm")
                 SizeMB   = [int]$snapshot.SizeMB
-            }
+            })
         }
     }
 
@@ -488,13 +623,13 @@ class ProactivaCollector {
             Show-Progress $vms.Count ($count + 1)
             if ($vm.ExtensionData.Config.Annotation -in $this.vcsaAnnotations) {
                 foreach ($partition in $vm.ExtensionData.Guest.Disk) {
-                    $this.partitionReport += [PSCustomObject]@{
+                    [void]$this.partitionReport.Add([PSCustomObject]@{
                         vCenter    = $this.currentVCenter
                         VM         = $vm.name
                         Annotation = $vm.ExtensionData.Config.Annotation
                         Disk       = $partition.DiskPath
                         "Free %"   = [math]::Round(($partition.FreeSpace / $partition.Capacity) * 100, 2)
-                    }
+                    })
                 }
             }
         }
@@ -502,11 +637,11 @@ class ProactivaCollector {
 
     CollectKernelAdapters($hosts) {
         Write-Host "`tProcesando adaptadores VMkernel..." -NoNewline
-        $kernelAdapters = $hosts | Get-VMHostNetworkAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "vmk[0-9]+" }
+        $kernelAdapters = @(Get-KernelAdapters -Hosts $hosts -Server $this.currentVCenter | Where-Object { $_.Name -match "vmk[0-9]+" })
         for ($count = 0; $count -lt $kernelAdapters.length; $count++) {
             Show-Progress $kernelAdapters.length ($count + 1)
             $kernelAdapter = $kernelAdapters[$count]
-            $this.kernelAdaptersReport += [PSCustomObject] @{
+            [void]$this.kernelAdaptersReport.Add([PSCustomObject] @{
                 Host       = $kernelAdapter.VMHost.Name
                 Name       = $kernelAdapter.Name
                 IP         = $kernelAdapter.IP
@@ -514,7 +649,7 @@ class ProactivaCollector {
                 PortGroup  = $kernelAdapter.PortGroupName
                 Management = $kernelAdapter.ManagementTrafficEnabled
                 vMotion    = $kernelAdapter.VMotionEnabled
-            }
+            })
         }
     }
 
@@ -540,7 +675,7 @@ class ProactivaCollector {
         }
 
         if (-not $targetVm) {
-            $this.sizingReport += [PSCustomObject]@{
+            [void]$this.sizingReport.Add([PSCustomObject]@{
                 vCenter             = $vcenterName
                 VM                  = "No encontrada"
                 Annotation          = "-"
@@ -549,7 +684,7 @@ class ProactivaCollector {
                 "Cantidad de VMs"   = $vms.Count
                 "Cantidad de Hosts" = $hosts.Count
                 "Sizing actual"     = "Unknown (VM not found)"
-            }
+            })
             return
         }
 
@@ -580,7 +715,7 @@ class ProactivaCollector {
             }
         }
 
-        $this.sizingReport += [PSCustomObject]@{
+        [void]$this.sizingReport.Add([PSCustomObject]@{
             vCenter             = $vcenterName
             VM                  = $targetVm.Name
             Annotation          = $annotation
@@ -589,7 +724,7 @@ class ProactivaCollector {
             "Cantidad de VMs"   = $vms.Count
             "Cantidad de Hosts" = $hosts.Count
             "Sizing actual"     = $currentSizing
-        }
+        })
 
         Write-Host " -> OK." -ForegroundColor Green
     }
@@ -624,13 +759,13 @@ class ProactivaCollector {
                 $fileName = "ERROR: $($_.Exception.Message)"
             }
 
-            $this.vdsReport += [PSCustomObject]@{
+            [void]$this.vdsReport.Add([PSCustomObject]@{
                 vCenter        = $this.currentVCenter
                 Name           = $vds.Name
                 MTU            = $vds.Mtu
                 "NIOC Enabled" = if ($vds.ExtensionData.Config.NetworkResourceManagementEnabled) { "True" } else { "False" }
                 "Backup File"  = $fileName
-            }
+            })
         }
         Write-Host " -> OK." -ForegroundColor Green
     }
@@ -641,13 +776,16 @@ class ProactivaCollector {
     CollectAlarmTest([bool] $skipAlarmTest) {
         Write-Host "`tProcesando prueba de alarmas (Falso Positivo)..." -NoNewline
 
-        $this.alarmCheckReport += $this.GetAlarmTestRow($skipAlarmTest)
-        $this.AuditAlarmConfiguration($this.currentVCenter, $this.currentVCenter)
+        # Every alarm definition, read once for both the test and the audit
+        $allAlarms = @(Get-AlarmDefinition -Server $this.currentVCenter -ErrorAction SilentlyContinue)
+
+        [void]$this.alarmCheckReport.Add($this.GetAlarmTestRow($skipAlarmTest, $allAlarms))
+        $this.AuditAlarmConfiguration($this.currentVCenter, $this.currentVCenter, $allAlarms)
 
         Write-Host " -> OK." -ForegroundColor Green
     }
 
-    [PSCustomObject] GetAlarmTestRow([bool] $skipAlarmTest) {
+    [PSCustomObject] GetAlarmTestRow([bool] $skipAlarmTest, $allAlarms) {
         $serverContext = $this.currentVCenter
         $vcenterName = $this.currentVCenter
 
@@ -656,7 +794,7 @@ class ProactivaCollector {
         $scriptPath = $null
 
         # 1. Target: the first accessible datastore
-        $targetDatastore = Get-Datastore -Server $serverContext | Where-Object { $_.State -eq "Available" } | Select-Object -First 1
+        $targetDatastore = $this.GetDatastores() | Where-Object { $_.State -eq "Available" } | Select-Object -First 1
 
         if (-not $targetDatastore) {
             Write-Warning " -> No hay datastores accesibles."
@@ -667,8 +805,6 @@ class ProactivaCollector {
         $targetName = $targetDatastore.Name
 
         # 2. Source alarm: the first alarm definition that has a script action configured
-        $allAlarms = Get-AlarmDefinition -Server $serverContext -ErrorAction SilentlyContinue
-
         foreach ($definition in $allAlarms) {
             try {
                 $info = $definition.ExtensionData.Info
@@ -814,12 +950,12 @@ class ProactivaCollector {
     }
 
     # Checks that the alarms Wetcom expects exist and have a script action configured (read-only)
-    AuditAlarmConfiguration($serverContext, $vcenterName) {
+    AuditAlarmConfiguration($serverContext, $vcenterName, $allAlarms) {
 
         # 1. Is vSAN enabled on any cluster?
         $isVsanEnabled = $false
         try {
-            $clusters = Get-Cluster -Server $serverContext -ErrorAction SilentlyContinue
+            $clusters = if ($null -ne $this.currentClusters) { $this.currentClusters } else { Get-Cluster -Server $serverContext -ErrorAction SilentlyContinue }
             foreach ($cluster in $clusters) {
                 if ($cluster.VsanEnabled) { $isVsanEnabled = $true; break }
             }
@@ -878,8 +1014,7 @@ class ProactivaCollector {
             "vSAN performance service alarm 'Verbose mode'", "vSAN performance service alarm 'Network diagnostic mode'"
         )
 
-        # Read every definition once and search in memory
-        $allAlarms = @(Get-AlarmDefinition -Server $serverContext -ErrorAction SilentlyContinue)
+        # $allAlarms: every definition, read once by CollectAlarmTest(); searched in memory
         $findAlarm = {
             param($alarms, $name)
             $exact = @($alarms | Where-Object { $_.Name -eq $name })
@@ -906,14 +1041,14 @@ class ProactivaCollector {
 
         # A certificate group with none of its variants is genuinely missing
         foreach ($label in $missingGroups) {
-            $this.alarmCheckReport += [PSCustomObject]@{
+            [void]$this.alarmCheckReport.Add([PSCustomObject]@{
                 vCenter      = $vcenterName
                 Host         = "-"
                 "Alarm Name" = $label
                 "Script Path"= "N/A"
                 Result       = "Not Found"
                 Timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-            }
+            })
         }
 
         # 4. Check each alarm's actions
@@ -947,14 +1082,14 @@ class ProactivaCollector {
                 }
             }
 
-            $this.alarmCheckReport += [PSCustomObject]@{
+            [void]$this.alarmCheckReport.Add([PSCustomObject]@{
                 vCenter      = $vcenterName
                 Host         = "-"
                 "Alarm Name" = $alarmName
                 "Script Path"= $path
                 Result       = $status
                 Timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-            }
+            })
         }
     }
 
@@ -996,7 +1131,7 @@ class ProactivaCollector {
             Write-Warning "Error leyendo la cuenta root del vCenter: $($_.Exception.Message)"
         }
 
-        $this.vCenterReport += [PSCustomObject]@{
+        [void]$this.vCenterReport.Add([PSCustomObject]@{
             "vCenter Server"  = $vcenterName
             "VM Name"         = $vmName
             "Version"         = $this.currentConnection.Version
@@ -1004,7 +1139,7 @@ class ProactivaCollector {
             "Root User"       = "root"
             "Expiration Date" = $expirationDate
             "Days Remaining"  = $daysRemaining
-        }
+        })
 
         Write-Host " -> OK." -ForegroundColor Green
     }
@@ -1029,7 +1164,7 @@ class ProactivaCollector {
                 if ($now -gt $validTo) { $status = "Expirado" }
                 elseif ($soonLimit -gt $validTo) { $status = "Expira Pronto" }
 
-                $this.certificateReport += [PSCustomObject]@{
+                [void]$this.certificateReport.Add([PSCustomObject]@{
                     vCenter      = $this.currentVCenter
                     Ubicacion    = "Machine SSL"
                     Subject      = $tlsCert.subject_dn
@@ -1037,7 +1172,7 @@ class ProactivaCollector {
                     "Valid From" = $validFrom
                     "Valid Until"= $validTo
                     Emisor       = $tlsCert.issuer_dn
-                }
+                })
             }
         }
         catch {
@@ -1059,7 +1194,7 @@ class ProactivaCollector {
                         if ($now -gt $cert.NotAfter) { $status = "Expirado" }
                         elseif ($soonLimit -gt $cert.NotAfter) { $status = "Expira Pronto" }
 
-                        $this.certificateReport += [PSCustomObject]@{
+                        [void]$this.certificateReport.Add([PSCustomObject]@{
                             vCenter      = $this.currentVCenter
                             Ubicacion    = $certType
                             Subject      = $cert.Subject
@@ -1067,7 +1202,7 @@ class ProactivaCollector {
                             "Valid From" = $cert.NotBefore
                             "Valid Until"= $cert.NotAfter
                             Emisor       = $cert.Issuer
-                        }
+                        })
                     } catch {}
                 }
             }
@@ -1095,7 +1230,7 @@ class ProactivaCollector {
                             if ($now -gt $rootCert.NotAfter) { $status = "Expirado" }
                             elseif ($soonLimit -gt $rootCert.NotAfter) { $status = "Expira Pronto" }
 
-                            $this.certificateReport += [PSCustomObject]@{
+                            [void]$this.certificateReport.Add([PSCustomObject]@{
                                 vCenter      = $this.currentVCenter
                                 Ubicacion    = "Trusted Root"
                                 Subject      = $rootCert.Subject
@@ -1103,7 +1238,7 @@ class ProactivaCollector {
                                 "Valid From" = $rootCert.NotBefore
                                 "Valid Until"= $rootCert.NotAfter
                                 Emisor       = $rootCert.Issuer
-                            }
+                            })
                         } catch {}
                     }
                 }
@@ -1174,7 +1309,7 @@ class ProactivaCollector {
                 }
             }
 
-            $this.performanceHealthReport += [PSCustomObject]@{
+            [void]$this.performanceHealthReport.Add([PSCustomObject]@{
                 vCenter      = $this.currentVCenter
                 Cluster      = $cluster.Name
                 "Health DB"  = $dbStatus
@@ -1182,7 +1317,7 @@ class ProactivaCollector {
                 "Mem Stats"  = $memStatus
                 "Net Stats"  = $netStatus
                 "Disk Stats" = $diskStatus
-            }
+            })
         }
         Write-Host " -> OK." -ForegroundColor Green
     }
@@ -1195,9 +1330,9 @@ class ProactivaCollector {
 
         if (-not $this.currentCisConnection) {
             Write-Warning " -> No hay conexion CIS activa para $vcenterName (error de permisos/conexion previa)."
-            $this.backupActivityReport += [PSCustomObject]@{
+            [void]$this.backupActivityReport.Add([PSCustomObject]@{
                 vCenter = $vcenterName; Type = "-"; Status = "Error de Conexión CIS"; "Data Transfer" = "-"; Location = "-"; StartTime = "-"; EndTime = "-"; Duration = "-"
-            }
+            })
             return
         }
 
@@ -1245,7 +1380,7 @@ class ProactivaCollector {
             }
 
             if ($allJobs.Count -eq 0) {
-                $this.backupActivityReport += [PSCustomObject]@{
+                [void]$this.backupActivityReport.Add([PSCustomObject]@{
                     vCenter          = $vcenterName
                     Type             = "-"
                     Status           = "No Configurado"
@@ -1254,7 +1389,7 @@ class ProactivaCollector {
                     StartTime        = "-"
                     EndTime          = "-"
                     Duration         = "-"
-                }
+                })
                 Write-Host " -> Sin historial (marcado como No Configurado)." -ForegroundColor Yellow
                 return
             }
@@ -1277,7 +1412,7 @@ class ProactivaCollector {
                     }
                 }
 
-                $this.backupActivityReport += [PSCustomObject]@{
+                [void]$this.backupActivityReport.Add([PSCustomObject]@{
                     vCenter          = $vcenterName
                     Type             = $type
                     Status           = if ($job.state) { $job.state } else { $job.status }
@@ -1286,16 +1421,16 @@ class ProactivaCollector {
                     StartTime        = Get-Date $job.start_time -Format "yyyy-MM-dd HH:mm:ss"
                     EndTime          = Get-Date $job.end_time -Format "yyyy-MM-dd HH:mm:ss"
                     Duration         = $duration
-                }
+                })
             }
 
             Write-Host " -> OK ($($backupHistory.Count) trabajos procesados)." -ForegroundColor Green
         }
         catch {
             Write-Warning "`nError en actividad de backup: $($_.Exception.Message)"
-            $this.backupActivityReport += [PSCustomObject]@{
+            [void]$this.backupActivityReport.Add([PSCustomObject]@{
                 vCenter = $vcenterName; Type = "-"; Status = "Error API: $($_.Exception.Message)"; "Data Transfer" = "-"; Location = "-"; StartTime = "-"; EndTime = "-"; Duration = "-"
-            }
+            })
         }
     }
 
@@ -1328,9 +1463,40 @@ class ProactivaCollector {
         }
     }
 
+    # IO HCL entries by "vid:did:svid:ssid"; the first entry of the file wins, like the
+    # Where-Object | Select-Object -First 1 it replaces
+    [hashtable] GetIoHclIndex() {
+        if ($null -eq $this.ioHclIndex) {
+            $index = @{}
+            foreach ($entry in $this.GetIoHclReference().data.ioDevices) {
+                $key = "$($entry.vid):$($entry.did):$($entry.svid):$($entry.ssid)"
+                if (-not $index.ContainsKey($key)) { $index[$key] = $entry }
+            }
+            $this.ioHclIndex = $index
+        }
+        return $this.ioHclIndex
+    }
+
+    # vSAN HCL links of every storage controller by "vid:did:svid:ssid", in file order
+    [hashtable] GetVsanHclIndex() {
+        if ($null -eq $this.vsanHclIndex) {
+            if ($null -eq $this.vsanHcl) {
+                $this.vsanHcl = Get-Content -Path (Join-Path $this.ReferenceDataFolder "vsan-hcl.json") -Raw | ConvertFrom-Json
+            }
+            $index = @{}
+            foreach ($entry in $this.vsanHcl.data.controller) {
+                $key = "$($entry.vid):$($entry.did):$($entry.svid):$($entry.ssid)"
+                if (-not $index.ContainsKey($key)) { $index[$key] = [System.Collections.Generic.List[object]]::new() }
+                $index[$key].Add($entry.vcglink)
+            }
+            $this.vsanHclIndex = $index
+        }
+        return $this.vsanHclIndex
+    }
+
     [PSCustomObject] GetIoHclReference() {
         if ($null -eq $this.ioHclRef) {
-            $this.ioHclRef = Get-Content -Path (Join-Path $this.ReferenceDataFolder "vmware-iohcl.json") | ConvertFrom-Json
+            $this.ioHclRef = Get-Content -Path (Join-Path $this.ReferenceDataFolder "vmware-iohcl.json") -Raw | ConvertFrom-Json
         }
         return $this.ioHclRef
     }
@@ -1342,6 +1508,239 @@ class ProactivaCollector {
         }
         return $this.toolsReference.($esxi.name)
     }
+}
+
+# VMs of the given hosts read with one Get-View, instead of Get-VM host by host plus
+# Get-NetworkAdapter / Get-CDDrive per VM. Each VM is an object with the properties of Get-VM's
+# that the collector uses (Id, Name, VMHost, PowerState, NumCpu, MemoryMB, MemoryGB,
+# HardwareVersion and ExtensionData, a partial view with only the properties below), plus:
+#   - NetworkAdapters: like Get-NetworkAdapter's (ParentId, Parent, Type, MacAddress, ConnectionState)
+#   - IsoPaths: the IsoPath of every CD drive backed by an ISO (what Get-CDDrive reports)
+#   - HasSnapshots
+# Templates are left out, as Get-VM does. Order: hosts as given, then the VMs of each host.
+function Get-VmInventory {
+    param(
+        [Parameter(Mandatory = $true)] $Server,
+        [Parameter(Mandatory = $true)] [object[]] $Hosts
+    )
+
+    $properties = @(
+        'Name', 'Runtime.Host', 'Runtime.PowerState', 'Runtime.ConnectionState',
+        'Config.Template', 'Config.Hardware.NumCPU', 'Config.Hardware.MemoryMB', 'Config.Hardware.Device',
+        'Config.Version', 'Config.Annotation', 'Config.GuestFullName',
+        'Guest.ToolsStatus', 'Guest.ToolsVersion', 'Guest.GuestFullName', 'Guest.Disk', 'Snapshot'
+    )
+    # PowerCLI's own enum, so PowerState prints as "PoweredOn" and serializes to JSON as a number
+    # exactly like Get-VM's
+    $powerStateType = 'VMware.VimAutomation.ViCore.Types.V1.Inventory.PowerState' -as [type]
+
+    $hostsById = @{}
+    $vmsByHostId = @{}
+    foreach ($h in $Hosts) {
+        $hostsById[$h.Id] = $h
+        $vmsByHostId[$h.Id] = [System.Collections.Generic.List[object]]::new()
+    }
+
+    foreach ($view in (Get-View -ViewType VirtualMachine -Property $properties -Server $Server)) {
+        if ($view.Config.Template -or $null -eq $view.Runtime.Host) { continue }
+        $hostId = "$($view.Runtime.Host.Type)-$($view.Runtime.Host.Value)"
+        if (-not $vmsByHostId.ContainsKey($hostId)) { continue }
+
+        $vmId = "$($view.MoRef.Type)-$($view.MoRef.Value)"
+        $powerStateName = [string]$view.Runtime.PowerState
+        $powerStateName = $powerStateName.Substring(0, 1).ToUpper() + $powerStateName.Substring(1)
+        $memoryMB = [decimal]$view.Config.Hardware.MemoryMB
+
+        $vm = [PSCustomObject]@{
+            Id              = $vmId
+            Name            = $view.Name
+            VMHost          = $hostsById[$hostId]
+            PowerState      = if ($powerStateType) { [enum]::Parse($powerStateType, $powerStateName) } else { $powerStateName }
+            NumCpu          = $view.Config.Hardware.NumCPU
+            MemoryMB        = $memoryMB
+            MemoryGB        = $memoryMB / 1024
+            HardwareVersion = $view.Config.Version
+            ExtensionData   = $view
+            NetworkAdapters = [System.Collections.Generic.List[object]]::new()
+            IsoPaths        = [System.Collections.Generic.List[object]]::new()
+            HasSnapshots    = $null -ne $view.Snapshot
+        }
+
+        foreach ($device in $view.Config.Hardware.Device) {
+            if ($device -is 'VMware.Vim.VirtualEthernetCard') {
+                $vm.NetworkAdapters.Add([PSCustomObject]@{
+                    ParentId        = $vmId
+                    Parent          = $vm
+                    Type            = Get-NetworkAdapterType $device
+                    MacAddress      = $device.MacAddress
+                    ConnectionState = [PSCustomObject]@{
+                        Connected      = $device.Connectable.Connected
+                        StartConnected = $device.Connectable.StartConnected
+                    }
+                })
+            }
+            elseif ($device -is 'VMware.Vim.VirtualCdrom' -and $device.Backing -is 'VMware.Vim.VirtualCdromIsoBackingInfo') {
+                $vm.IsoPaths.Add($device.Backing.FileName)
+            }
+        }
+
+        $vmsByHostId[$hostId].Add($vm)
+    }
+
+    # Within a host, the order of the host's own VM list (HostSystem.vm), which is the order
+    # "Get-VM -Location <host>" returns them in; VMs not in that list go last, as read
+    foreach ($h in $Hosts) {
+        $position = @{}
+        $index = 0
+        foreach ($vmRef in $h.ExtensionData.Vm) { $position["$($vmRef.Type)-$($vmRef.Value)"] = $index++ }
+
+        $ordered = [System.Collections.Generic.List[object]]::new($vmsByHostId[$h.Id])
+        $fallback = $ordered.Count + 1
+        $readOrder = @{}
+        for ($i = 0; $i -lt $ordered.Count; $i++) { $readOrder[$ordered[$i].Id] = $i }
+        $ordered.Sort([Comparison[object]] {
+            param($a, $b)
+            $pa = if ($position.ContainsKey($a.Id)) { $position[$a.Id] } else { $fallback + $readOrder[$a.Id] }
+            $pb = if ($position.ContainsKey($b.Id)) { $position[$b.Id] } else { $fallback + $readOrder[$b.Id] }
+            $pa.CompareTo($pb)
+        })
+        foreach ($vm in $ordered) { $vm }
+    }
+}
+
+# Port groups by name in ordinal order (upper case before lower case), the order
+# Get-VirtualPortGroup returns them in
+function Get-SortedPortGroups($portGroups) {
+    $items = [System.Collections.Generic.List[object]]::new()
+    foreach ($portGroup in $portGroups) { $items.Add($portGroup) }
+    $items.Sort([Comparison[object]] { param($a, $b) [string]::CompareOrdinal([string]$a.Spec.Name, [string]$b.Spec.Name) })
+    return $items
+}
+
+# PowerCLI's name for a network card type (NetworkAdapter.Type), from its vSphere device class
+function Get-NetworkAdapterType($device) {
+    switch ($device.GetType().Name) {
+        'VirtualE1000' { return 'e1000' }
+        'VirtualE1000e' { return 'e1000e' }
+        'VirtualPCNet32' { return 'Flexible' }
+        'VirtualVmxnet' { return 'Vmxnet' }
+        'VirtualVmxnet2' { return 'EnhancedVmxnet' }
+        'VirtualVmxnet3' { return 'Vmxnet3' }
+        'VirtualVmxnet3Vrdma' { return 'Vmxnet3Vrdma' }
+        'VirtualSriovEthernetCard' { return 'SriovEthernetCard' }
+    }
+    return 'Unknown'
+}
+
+# Snapshots (Get-Snapshot, which works out SizeMB) of the VMs that have any, grouped VM by VM
+# in the order of $Vms. VMs without snapshots are not asked.
+function Get-VmSnapshots {
+    param(
+        [Parameter(Mandatory = $true)] $Server,
+        [object[]] $Vms
+    )
+
+    $withSnapshots = @($Vms | Where-Object { $_.HasSnapshots })
+    if ($withSnapshots.Count -eq 0) { return }
+
+    $snapshotsByVm = @{}
+    foreach ($snapshot in (Get-VM -Id @($withSnapshots | ForEach-Object { $_.Id }) -Server $Server | Get-Snapshot)) {
+        $vmId = $snapshot.VM.Id
+        if (-not $snapshotsByVm.ContainsKey($vmId)) { $snapshotsByVm[$vmId] = [System.Collections.Generic.List[object]]::new() }
+        $snapshotsByVm[$vmId].Add($snapshot)
+    }
+
+    foreach ($vm in $withSnapshots) {
+        foreach ($snapshot in $snapshotsByVm[$vm.Id]) { $snapshot }
+    }
+}
+
+# VMkernel adapters of the hosts with the fields of Get-VMHostNetworkAdapter that the report
+# uses, read from each host's ExtensionData instead of one query per host:
+#   - Management / vMotion: whether the adapter is selected for that service in
+#     Config.VirtualNicManagerInfo;
+#   - PortGroupName: the standard port group, or the name of the distributed one (one Get-View
+#     of every distributed port group, only if some adapter is on a vDS).
+# Hosts without configuration (disconnected) are skipped, as the cmdlet does.
+function Get-KernelAdapters {
+    param(
+        [Parameter(Mandatory = $true)] [object[]] $Hosts,
+        [Parameter(Mandatory = $true)] $Server
+    )
+
+    $distributedPortGroups = $null
+
+    foreach ($h in $Hosts) {
+        $config = $h.ExtensionData.Config
+        if ($null -eq $config -or $null -eq $config.Network) { continue }
+
+        # Adapter device ("vmk0") -> services it is selected for ("management", "vmotion", ...)
+        $servicesByDevice = @{}
+        foreach ($netConfig in $config.VirtualNicManagerInfo.NetConfig) {
+            foreach ($candidate in $netConfig.CandidateVnic) {
+                if ($netConfig.SelectedVnic -contains $candidate.Key) {
+                    if (-not $servicesByDevice.ContainsKey($candidate.Device)) { $servicesByDevice[$candidate.Device] = [System.Collections.Generic.List[string]]::new() }
+                    $servicesByDevice[$candidate.Device].Add($netConfig.NicType)
+                }
+            }
+        }
+
+        foreach ($vnic in $config.Network.Vnic) {
+            $portGroupName = $vnic.Portgroup
+            if ([string]::IsNullOrEmpty($portGroupName) -and $vnic.Spec.DistributedVirtualPort) {
+                if ($null -eq $distributedPortGroups) {
+                    $distributedPortGroups = @{}
+                    foreach ($portGroup in (Get-View -ViewType DistributedVirtualPortgroup -Property Key, Name -Server $Server)) {
+                        $distributedPortGroups[$portGroup.Key] = $portGroup.Name
+                    }
+                }
+                $portGroupName = $distributedPortGroups[$vnic.Spec.DistributedVirtualPort.PortgroupKey]
+            }
+
+            $services = $servicesByDevice[$vnic.Device]
+            [PSCustomObject]@{
+                VMHost                   = $h
+                Name                     = $vnic.Device
+                IP                       = $vnic.Spec.Ip.IpAddress
+                MTU                      = $vnic.Spec.Mtu
+                PortGroupName            = $portGroupName
+                ManagementTrafficEnabled = [bool]($services -contains 'management')
+                VMotionEnabled           = [bool]($services -contains 'vmotion')
+            }
+        }
+    }
+}
+
+# Advanced settings as a case-insensitive name -> value table, from Get-AdvancedSetting results
+# (Name / Value) or OptionManager.Setting (Key / Value). The first one of each name wins.
+function New-SettingDictionary($settings) {
+    $dictionary = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($setting in $settings) {
+        $name = if ($setting.PSObject.Properties['Name']) { $setting.Name } else { $setting.Key }
+        if ($null -ne $name -and -not $dictionary.ContainsKey($name)) { $dictionary[$name] = $setting.Value }
+    }
+    return $dictionary
+}
+
+# Groups objects in lists by the Id that $getId returns for each one (its only parameter),
+# keeping their order
+function Group-ById($items, [scriptblock] $getId) {
+    $groups = @{}
+    foreach ($item in $items) {
+        $id = & $getId $item
+        if (-not $groups.ContainsKey($id)) { $groups[$id] = [System.Collections.Generic.List[object]]::new() }
+        $groups[$id].Add($item)
+    }
+    return $groups
+}
+
+# What a property access on a pipeline result gives: $null for none, the item for one, an
+# array for several (keeps the JSON exactly as the Where-Object version produced it)
+function Get-SingleOrArray($items) {
+    $list = @($items)
+    if ($list.Count -eq 0) { return $null }
+    if ($list.Count -eq 1) { return $list[0] }
+    return $list
 }
 
 function ConvertFrom-PemCertificate([string] $pem) {
