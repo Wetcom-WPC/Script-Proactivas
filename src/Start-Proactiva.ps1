@@ -34,8 +34,8 @@ collection makes to the environment). The rest of the alarm audit still runs.
 
 .EXAMPLE
 .\Start-Proactiva.ps1
-.\Start-Proactiva.ps1 -Client "Orbis" -Month "Octubre" -Frequency Quarterly -VCenters vc01.orbis.local
-.\Start-Proactiva.ps1 -ReportOnly -Client "Orbis" -Month "Octubre" -Frequency Quarterly
+.\Start-Proactiva.ps1 -Client "Cliente" -Month "Octubre" -Frequency Quarterly -VCenters vc01.cliente.local
+.\Start-Proactiva.ps1 -ReportOnly -Client "Cliente" -Month "Octubre" -Frequency Quarterly
 #>
 param(
     [string] $Client,
@@ -50,7 +50,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$global:APP_VERSION = "v3.0.0"
+$global:APP_VERSION = "v3.1.0"
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $runtimeModules = Join-Path $repoRoot 'runtime\Modules'
@@ -62,6 +62,7 @@ $frequencyLabels = [ordered]@{
 }
 
 Import-Module (Join-Path $PSScriptRoot 'shared\RunFolder.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'shared\Exclusions.psm1') -Force
 
 # Duration as m:ss (shown in the final summary)
 function Format-StageDuration([TimeSpan] $Duration) {
@@ -107,6 +108,11 @@ if (-not $ReportOnly) {
     $VCenters = @($VCenters -join ',' -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     while ($VCenters.Count -eq 0) {
         $VCenters = @((Read-Host "vCenters (separados por coma)") -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+
+    $avsVCenters = @($VCenters | Where-Object { Test-IsAvsVCenter $_ })
+    if ($avsVCenters.Count -gt 0) {
+        Write-Host "Azure VMware Solution ($($avsVCenters -join ', ')): lo gestiona Microsoft, se relevan solo las VMs." -ForegroundColor Yellow
     }
 }
 

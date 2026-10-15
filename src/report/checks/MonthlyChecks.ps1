@@ -63,7 +63,7 @@ function Test-VCenterSizing($Context) {
 
             $cores = 0; $memoryGB = 0.0; $vmCount = 0
             [void][int]::TryParse($vcenter.'vCPU', [ref]$cores)
-            [void][double]::TryParse(($vcenter.'Memory GB'.ToString()).Replace(',','.'), [ref]$memoryGB)
+            [void][double]::TryParse(([string]$vcenter.'Memory GB').Replace(',','.'), [ref]$memoryGB)
             [void][int]::TryParse($vcenter.'Cantidad de VMs', [ref]$vmCount)
 
             if (($cores -lt $required.vcpus) -or ($memoryGB -lt $required.ramGB) -or ($vmCount -gt $required.vmsMax)) {
@@ -95,7 +95,7 @@ function Test-PartitionFreeSpace($Context) {
         if ($row.PSObject.Properties['Disk'] -and $row.PSObject.Properties['Free %']) {
             $freePercent = 0
             [void][double]::TryParse((([string]$row."Free %").Replace(',', '.') -replace '[^0-9.]'), [ref]$freePercent)
-            $diskPath = $row.Disk.Trim()
+            $diskPath = ([string]$row.Disk).Trim()
 
             if (($freePercent -lt 30) -and ($diskPath -ne "/storage/core" -and $diskPath -ne "/storage/archive")) {
                 $findings += [PSCustomObject]@{
@@ -119,7 +119,7 @@ function Test-PartitionFreeSpace($Context) {
 function Test-SyslogConfiguration($Context) {
     $findings = @()
 
-    foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
+    foreach ($row in (Get-EsxiRows $Context)) {
         if ($row.PSObject.Properties['SyslogGlobalLogDir'] -and $row.PSObject.Properties['SyslogGlobalLogHost']) {
             $logDir = $row.SyslogGlobalLogDir
             $logHost = $row.SyslogGlobalLogHost
@@ -160,7 +160,7 @@ function Test-MultipathPolicy($Context) {
         # A datastore named after its host is the host's local datastore: skip it
         if ($datastoreName -match $hostShortName) { continue }
 
-        $policy = $row.Policy.Trim()
+        $policy = ([string]$row.Policy).Trim()
         if ($policy -eq 'vSAN') { continue }
 
         $isLocal = ($datastoreName -match "local" -or $datastoreName -match "datastore1")
@@ -195,7 +195,7 @@ function Test-MultipathPolicy($Context) {
 function Test-EsxiVersionConsistency($Context) {
     $findings = @()
 
-    foreach ($clusterHosts in (Get-HostsByCluster (Import-RawSheet $Context.RawExcelPath "ESXi")).Values) {
+    foreach ($clusterHosts in (Get-HostsByCluster (Get-EsxiRows $Context)).Values) {
         $versions = $clusterHosts | ForEach-Object { if ($_.EsxiVersion) { $_.EsxiVersion.Trim() } } | Select-Object -Unique
         if ($versions.Count -gt 1) {
             $findings += $clusterHosts
@@ -225,13 +225,13 @@ function Test-HostResourceConsistency($Context) {
 
     $findings = @()
 
-    foreach ($clusterHosts in (Get-HostsByCluster (Import-RawSheet $Context.RawExcelPath "ESXi")).Values) {
+    foreach ($clusterHosts in (Get-HostsByCluster (Get-EsxiRows $Context)).Values) {
         $memories = @(); $speeds = @(); $models = @()
 
         foreach ($h in $clusterHosts) {
             $memories += [double](([string]$h.MemoryGB) -replace '[^0-9\.,]', '' -replace ',', '.')
             $speeds += [double](([string]$h.CpuSpeed) -replace '[^0-9\.,]', '' -replace ',', '.')
-            $models += $h.CpuModel.ToString().Trim()
+            $models += ([string]$h.CpuModel).Trim()
         }
 
         $memoryRange = ($memories | Measure-Object -Maximum).Maximum - ($memories | Measure-Object -Minimum).Minimum
@@ -271,7 +271,7 @@ function Test-VmNicAdapterType($Context) {
     foreach ($row in (Import-RawSheet $Context.RawExcelPath "VM")) {
         if ($null -eq $row -or -not $row.PSObject.Properties['SO (vCenter)'] -or -not $row.PSObject.Properties['VM']) { continue }
 
-        $guestOs = $row."SO (vCenter)".Trim()
+        $guestOs = ([string]$row."SO (vCenter)").Trim()
         $isModernWindows = ($guestOs -like "Microsoft Windows*") -and ($guestOs -notlike "*2003*") -and ($guestOs -notlike "*2000*")
         if (-not $isModernWindows) { continue }
 
@@ -327,13 +327,18 @@ function Test-EsxiShellTimeout($Context) {
     $findings = @()
     $foundZero = $false
     $foundOutOfRange = $false
+    $unreadable = 0
 
-    foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
+    foreach ($row in (Get-EsxiRows $Context)) {
         if (-not ($row.PSObject.Properties['ESXIShellTimeOut'] -and $row.PSObject.Properties['ESXIShellinteractiveTimeOut'])) { continue }
 
         $timeout = $row.ESXIShellTimeOut
         $interactiveTimeout = $row.ESXIShellinteractiveTimeOut
         $isWrong = $false
+
+        # The advanced settings could not be read (empty cell): there is no value to judge, and
+        # an empty value would otherwise compare as "below 300"
+        if ($null -eq $timeout -or $null -eq $interactiveTimeout) { $unreadable++; continue }
 
         if ($timeout -eq 0 -or $interactiveTimeout -eq 0) {
             $foundZero = $true
@@ -365,6 +370,7 @@ function Test-EsxiShellTimeout($Context) {
         $result = "Fuera de valor recomendado"
         $detail = "Se encontraron hosts con timeout de TSM configurado fuera del rango recomendado (300-1800s)"
     }
+    if ($unreadable -gt 0) { $detail += ". $unreadable hosts sin datos de configuracion (no se pudieron leer) no se evaluaron" }
 
     if ($findings.Count -gt 0) {
         Export-AnnexSheet -Data $findings -Path $Context.AnnexPath -WorksheetName "Verificacion de TSM" -NoNumberConversion "Hostname"
@@ -375,9 +381,13 @@ function Test-EsxiShellTimeout($Context) {
 
 function Test-PowerManagementPolicy($Context) {
     $findings = @()
+    $unreadable = 0
 
-    foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
-        if ($null -ne $row -and $row.PSObject.Properties['PowerManagement'] -and $row.PowerManagement.Trim() -ne "High performance") {
+    foreach ($row in (Get-EsxiRows $Context)) {
+        if ($null -eq $row -or -not $row.PSObject.Properties['PowerManagement']) { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$row.PowerManagement)) { $unreadable++; continue }   # not readable on this host
+
+        if (([string]$row.PowerManagement).Trim() -ne "High performance") {
             $findings += [PSCustomObject]@{
                 "vCenter"         = $row."vCenter"
                 "Hostname"        = $row."Hostname"
@@ -388,18 +398,20 @@ function Test-PowerManagementPolicy($Context) {
         }
     }
 
+    $unreadableNote = if ($unreadable -gt 0) { ". $unreadable hosts sin datos de configuracion (no se pudieron leer) no se evaluaron" } else { "" }
+
     if ($findings.Count -gt 0) {
         Export-AnnexSheet -Data $findings -Path $Context.AnnexPath -WorksheetName "Power Management" -NoNumberConversion "Hostname"
-        return [PSCustomObject]@{ ID = "VSP-ME-14"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) hosts con una politica de Power Management no recomendada" }
+        return [PSCustomObject]@{ ID = "VSP-ME-14"; Resultado = "No recomendado"; Detalle = "Se encontraron $($findings.Count) hosts con una politica de Power Management no recomendada$unreadableNote" }
     }
 
-    return [PSCustomObject]@{ ID = "VSP-ME-14"; Resultado = "Resultado Esperado"; Detalle = "Todos los hosts analizados tienen la politica de Power Management configurada en High Performance" }
+    return [PSCustomObject]@{ ID = "VSP-ME-14"; Resultado = "Resultado Esperado"; Detalle = "Todos los hosts analizados tienen la politica de Power Management configurada en High Performance$unreadableNote" }
 }
 
 function Test-VmwareToolsStatus($Context) {
     $findings = @(Import-RawSheet $Context.RawExcelPath "VM" | Where-Object {
-        $status = $_.ToolsStatus.Trim()
-        $state = $_.State.Trim()
+        $status = ([string]$_.ToolsStatus).Trim()
+        $state = ([string]$_.State).Trim()
         # Powered-off VMs with tools "not running" are fine
         $hasToolsProblem = -not (($status -eq "toolsOk") -or (($state -eq "PoweredOff") -and ($status -eq "toolsNotRunning")))
         # Replicas are not reported
@@ -564,6 +576,7 @@ function Test-AlarmConfiguration($Context) {
     $causes = @()
     $scriptArguments = @()
     $testSkipped = $false
+    $noPermission = @()
 
     foreach ($row in $rows) {
         $result = if ($row.Result) { $row.Result.ToString().Trim() } else { "" }
@@ -574,6 +587,22 @@ function Test-AlarmConfiguration($Context) {
         # Run with -SkipAlarmTest: the "Falso Positivo" test did not run, which is not a failure
         if ($result -like "Omitida*") {
             $testSkipped = $true
+            continue
+        }
+
+        # The account may not create alarms: the test could not run, which says nothing about
+        # how the client configured theirs, so it is not counted as an anomaly
+        if ($result -like "*Permission to perform this operation was denied*") {
+            $noPermission += $row.vCenter
+            $findings += [PSCustomObject]@{
+                "vCenter"       = $row.vCenter
+                "Host"          = $row.Host
+                "Alarma"        = $alarmName
+                "Script Path"   = $scriptPath
+                "Resultado"     = $result
+                "Diagnóstico"   = "Sin permisos para crear la alarma de prueba (el usuario no puede crear alarmas)"
+                "Timestamp"     = $row.Timestamp
+            }
             continue
         }
 
@@ -647,6 +676,16 @@ function Test-AlarmConfiguration($Context) {
 
     if ($testSkipped) {
         $detail += " La prueba de Falso Positivo no se ejecuto (corrida con -SkipAlarmTest): solo se audito la configuracion de las alarmas."
+    }
+
+    if ($noPermission.Count -gt 0) {
+        $permissionNote = "La prueba de Falso Positivo no se pudo ejecutar en $($noPermission.Count) vCenters por permisos insuficientes del usuario ($($noPermission -join ', ')): validarla manualmente."
+        if ($failureCount -eq 0) {
+            $checklistResult = "Sin acceso"
+            $detail = "$permissionNote Se verificaron $successCount alarmas/pruebas correctamente en el resto."
+        } else {
+            $detail += " $permissionNote"
+        }
     }
 
     if ($findings.Count -gt 0) {

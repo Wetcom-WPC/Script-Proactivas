@@ -269,7 +269,7 @@ class ProactivaCollector {
                 # Nutanix hosts: ESXi is managed through Nutanix (AOS/LCM) and what is supported is
                 # defined by Nutanix's own compatibility matrix, so the Broadcom HCL result is
                 # kept only as reference and the check is left to the client's responsible
-                Supported                   = if ($hclResult.IsNutanix) { "Nutanix" } elseif ($null -eq $hclResult.Supported) { "Sin datos" } elseif ($hclResult.Supported) { "True" } else { "False" }
+                Supported                   = if ($hclResult.IsNutanix) { "Nutanix" } elseif ($hclResult.IsVirtual) { "No aplica" } elseif ($null -eq $hclResult.Supported) { "Sin datos" } elseif ($hclResult.Supported) { "True" } else { "False" }
                 "Supported Releases"        = $hclResult.SupportedReleases -join ","
                 Note                        = if ($hclResult.IsNutanix) { "Host Nutanix: validacion manual contra la Nutanix Compatibility & Interoperability Matrix. Referencia Broadcom: $($hclResult.Note)" } else { $hclResult.Note }
                 Reference                   = $hclResult.Reference
@@ -921,21 +921,16 @@ class ProactivaCollector {
 
             # F. Wait and check. Get-VIEvent does not support datastores ("Events can be retrieved
             # only for inventory objects"), so the trigger is confirmed from the datastore's
-            # triggered alarm state instead. Polled every 2 s (up to 30 s) instead of a fixed wait;
-            # once it fires, a few seconds of margin let vCenter run the script action before
-            # the alarm is removed.
-            $deadline = (Get-Date).AddSeconds(30)
-            $fired = $false
-            do {
-                Start-Sleep -Seconds 2
+            # triggered alarm state instead.
+            # A large vCenter can take longer than a few seconds to evaluate a new alarm, so it is
+            # checked every 5 seconds for up to 90 and the wait ends as soon as it fires
+            $triggeredState = $null
+            for ($waited = 0; $waited -lt 90 -and -not ($triggeredState -and $triggeredState.OverallStatus -eq "red"); $waited += 5) {
+                Start-Sleep -Seconds 5
                 $datastoreView = Get-View $targetDatastore.Id -Property TriggeredAlarmState -Server $serverContext
                 $triggeredState = $datastoreView.TriggeredAlarmState | Where-Object { $_.Alarm.Value -eq $alarmRef.Value }
-                $fired = $triggeredState -and $triggeredState.OverallStatus -eq "red"
-            } until ($fired -or (Get-Date) -gt $deadline)
-
-            if ($fired) { Start-Sleep -Seconds 5 }
-
-            $result = if ($fired) {
+            }
+            $result = if ($triggeredState -and $triggeredState.OverallStatus -eq "red") {
                 "SUCCESS (Falso positivo ejecutado)"
             } else {
                 "WARNING: Alarm created but trigger failed"

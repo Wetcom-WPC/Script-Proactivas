@@ -1,5 +1,7 @@
 using module .\ProactivaCollector.psm1
 
+Import-Module (Join-Path $PSScriptRoot '..\shared\Exclusions.psm1')
+
 # Step 1 of the pipeline: connect to the vCenters and collect the data into JSON files.
 
 # Connects to every vCenter in $Servers (SOAP + CIS/REST).
@@ -163,12 +165,21 @@ function Invoke-VCenterCollection {
     Write-Host "`nProcesando vCenter: $($Collector.currentVCenter)"
     $timings = [ordered]@{}
 
+    # Azure VMware Solution: Microsoft runs everything except the VMs, so only those (and
+    # their snapshots) are collected: no alarm test, no hosts, no appliance, no vDS export
+    $isAvs = Test-IsAvsVCenter $Collector.currentVCenter
+    if ($isAvs) {
+        Write-Host "`tvCenter de Azure VMware Solution: se relevan solo las VMs y sus snapshots (el resto lo gestiona Microsoft)." -ForegroundColor Yellow
+    }
+
     Write-Host "`tObteniendo objetos principales..."
     $hosts = @(Measure-CollectionStage $timings 'Hosts' { Get-VMHost -Server $Server })
     $clusters = @(Measure-CollectionStage $timings 'Clusters' { Get-Cluster -Server $Server })
-    $vdSwitches = @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $Server })
+    $vdSwitches = if ($isAvs) { @() } else { @(Measure-CollectionStage $timings 'Lista de vDS' { Get-VDSwitch -Server $Server }) }
     Measure-CollectionStage $timings 'Ubicacion de los hosts' { $Collector.SetHostLocations($clusters) }
-    Measure-CollectionStage $timings 'Lista de datastores' { $Collector.SetDatastores((Get-Datastore -Server $Server)) }
+    if (-not $isAvs) {
+        Measure-CollectionStage $timings 'Lista de datastores' { $Collector.SetDatastores((Get-Datastore -Server $Server)) }
+    }
 
     # Every VM in one query (with its network cards and ISOs); snapshots only of the VMs
     # that have any
@@ -178,6 +189,13 @@ function Invoke-VCenterCollection {
     Write-Host "`tSe encontraron $($hosts.Count) hosts, $($clusters.Count) clusters, $($allVms.Count) VMs, $($vdSwitches.Count) vDS."
 
     Write-Host "`tProcesando reportes..."
+    if ($isAvs) {
+        Measure-CollectionStage $timings 'VMs y placas de red' { $Collector.CollectVms($allVms, $clusters, $allSnapshots) }
+        Measure-CollectionStage $timings 'Snapshots' { $Collector.CollectSnapshots($allSnapshots) }
+        Write-StageTimings -Title "recoleccion de $($Collector.currentVCenter)" -Timings $timings
+        return
+    }
+
     Measure-CollectionStage $timings 'Prueba de alarmas' { $Collector.CollectAlarmTest([bool]$SkipAlarmTest) }
     Measure-CollectionStage $timings 'Sizing del vCenter' { $Collector.CollectVCenterSizing($allVms, $hosts) }
     Measure-CollectionStage $timings 'Backups (VAMI)' { $Collector.CollectBackupActivity() }
@@ -269,6 +287,9 @@ function Invoke-DriverCollection {
     $minHostsForParallel = 6
 
     foreach ($vcenter in $VCenters) {
+        # The hosts of Azure VMware Solution are Microsoft's
+        if (Test-IsAvsVCenter $vcenter.Name) { continue }
+
         $collector.SetCurrentVCenter($vcenter.Connection, $vcenter.CisConnection)
         Write-Host "`nProcesando drivers del vCenter: $($vcenter.Name)"
 

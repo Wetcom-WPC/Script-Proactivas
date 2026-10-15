@@ -39,7 +39,7 @@ Si te equivocaste en el cliente, el mes o el tipo de proactiva, corré **`extra\
 `src\Start-Proactiva.ps1` acepta todo por parámetro; lo que no se pasa, lo pregunta. Correlo siempre con el PowerShell incluido:
 
 ```powershell
-.\runtime\pwsh.exe -ExecutionPolicy Bypass -File .\src\Start-Proactiva.ps1 -Client "Orbis" -Month "Octubre" -Frequency Quarterly -VCenters vc01.orbis.local,vc02.orbis.local
+.\runtime\pwsh.exe -ExecutionPolicy Bypass -File .\src\Start-Proactiva.ps1 -Client "Cliente" -Month "Octubre" -Frequency Quarterly -VCenters vc01.cliente.local,vc02.cliente.local
 ```
 
 | Parámetro | Para qué |
@@ -158,6 +158,12 @@ Si corrés el proceso más de una vez el mismo día, cada corrida tiene su propi
 **TR-04 (Drivers):** lista todas las placas en la hoja "Host Drivers" del anexo y marca "No compatible" si alguna no figura en la HCL para la release de su host. Las versiones de driver/firmware no se pueden validar automáticamente con los datos de referencia, así que si no hay incompatibilidades el Estado queda en blanco para que el técnico lo complete revisando la URL de cada placa.
 
 **TR-02 (Compatibilidad de servidores):** en cada corrida se descarga el catálogo completo de "Systems / Servers" del [Broadcom Compatibility Guide](https://compatibilityguide.broadcom.com), desde la misma API que usa su web (sin autenticación, unos 6 MB). Si no hay internet o la API cambia, se usa la copia local `src\collection\reference-data\servers-hcl.csv`; la columna `Note` de la hoja ESXi del Excel crudo indica qué fuente se usó. Se compara modelo + familia de CPU + release del host. Si el modelo está en la HCL pero no con la familia de CPU del host, queda como "Sin datos" y el detalle de la checklist lista esos hosts para revisión manual.
+
+**Azure VMware Solution (AVS):** en los vCenters de AVS (`*.avs.azure.com`) Microsoft gestiona los hosts, sus certificados, las cuentas del appliance, las licencias y casi toda la configuración, y el usuario del cliente no tiene derechos sobre eso, así que esos hallazgos no serían accionables. Lo que corre dentro de las VMs sí es del cliente: de AVS se relevan **solo las VMs y sus snapshots**, y se analizan mezcladas con las del resto (VMware Tools, adaptadores E1000, ISOs, snapshots y NICs; en el anexo se distinguen por la columna `vCenter`). No se hace la prueba de Falso Positivo, ni la exportación de vDS, ni la recolección de hosts o drivers en AVS. Si los datos de una corrida anterior traen filas de AVS en otras hojas, el reporte las deja afuera (el Excel crudo las conserva). La regla está en `src\shared\Exclusions.psm1`.
+
+**Hosts que no se evalúan:** los appliances de HCX ("VMware Mobility Platform") figuran como hosts en el vCenter pero no tienen configuración propia, así que los chequeos de hosts los saltean (el Excel crudo los conserva). Los ESXi anidados (modelo `VMware7,1`) tampoco se evalúan en TR-02 porque no tienen entrada en la HCL de servidores. Los hosts cuya configuración no se pudo leer no se evalúan en TSM (ME-12) ni Power Management (ME-14), y los certificados de host que no se pudieron leer (por ejemplo, falta el privilegio `Certificate.Manage`) se informan aparte en TR-08 en vez de darse por válidos.
+
+**Si un chequeo falla:** el error queda en el log, el chequeo se saltea y sus filas de la checklist quedan en blanco con una nota para revisarlas a mano; el resto del reporte se genera igual. Al final de la consola se listan los chequeos que fallaron.
 
 **Hosts Nutanix en TR-02:** los hosts cuyo fabricante es Nutanix no se validan contra la HCL de Broadcom sino contra la Nutanix Compatibility & Interoperability Matrix (versión de AOS vs ESXi). Por eso TR-02 se cierra solo con el resto de los hosts (Resultado Esperado / No recomendado) y, si hay hosts Nutanix, el script agrega a la checklist una fila nueva justo debajo, **`VSP-TR-02-NX`** (Procedimiento: Manual), con el Estado en blanco y los hosts listados en Comentarios, para que la complete el responsable del cliente. Si todos los hosts son Nutanix, TR-02 queda en blanco. La fila solo existe en las checklists de clientes con Nutanix. Los nodos Nutanix de otros fabricantes (Dell XC, Lenovo HX, HPE DX) se reportan con el fabricante de origen y no se pueden detectar desde el vCenter.
 

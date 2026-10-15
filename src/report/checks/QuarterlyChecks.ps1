@@ -16,7 +16,7 @@ function Test-EsxiEndOfSupport($Context) {
     $today = Get-Date
     $oneYearFromNow = $today.AddYears(1)
 
-    foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
+    foreach ($row in (Get-EsxiRows $Context)) {
         if (-not $row.PSObject.Properties['ESXiVersion']) { continue }
 
         $fullVersion = $row.ESXiVersion
@@ -74,19 +74,24 @@ function Test-HardwareCompatibility($Context) {
     $findings = @()
     $noDataHosts = @()
     $nutanixHosts = @()
+    $virtualHosts = 0
     $totalHosts = 0
 
-    foreach ($row in (Import-RawSheet $Context.RawExcelPath "ESXi")) {
+    foreach ($row in (Get-EsxiRows $Context)) {
         if (-not $row.PSObject.Properties['Supported']) { continue }
         $totalHosts++
 
-        if ($row.Supported.Trim() -eq "Nutanix") {
+        if (([string]$row.Supported).Trim() -eq "Nutanix") {
             $nutanixHosts += $row.Hostname
         }
-        elseif ($row.Supported.Trim() -eq "Sin datos") {
+        elseif (([string]$row.Supported).Trim() -eq "No aplica") {
+            $virtualHosts++    # nested ESXi: no server HCL entry exists
+            $totalHosts--
+        }
+        elseif (([string]$row.Supported).Trim() -eq "Sin datos") {
             $noDataHosts += $row.Hostname
         }
-        elseif ($row.Supported.Trim() -eq "False") {
+        elseif (([string]$row.Supported).Trim() -eq "False") {
             $findings += [PSCustomObject]@{
                 "vCenter"                   = $row."vCenter"
                 "Hostname"                  = $row."Hostname"
@@ -108,6 +113,8 @@ function Test-HardwareCompatibility($Context) {
     # Nutanix hosts get their own checklist row (VSP-TR-02-NX, created right below TR-02): they
     # are validated against Nutanix's compatibility matrix by the client's responsible, not
     # against Broadcom's HCL. TR-02 itself only covers the other hosts.
+    $virtualNote = if ($virtualHosts -gt 0) { " $virtualHosts hosts ESXi virtuales (anidados) no se evaluan contra la HCL." } else { "" }
+    $noDataNote += $virtualNote
     $nutanixNote = if ($nutanixHosts.Count -gt 0) { " Los $($nutanixHosts.Count) hosts Nutanix se validan aparte (fila VSP-TR-02-NX)." } else { "" }
 
     if ($findings.Count -gt 0) {
@@ -140,12 +147,12 @@ function Test-NtpConfiguration($Context) {
     $foundServiceStopped = $false
     $foundInconsistency = $false
 
-    foreach ($clusterHosts in (Get-HostsByCluster (Import-RawSheet $Context.RawExcelPath "ESXi")).Values) {
+    foreach ($clusterHosts in (Get-HostsByCluster (Get-EsxiRows $Context)).Values) {
         if ($clusterHosts.Where({ [string]::IsNullOrEmpty($_.NtpServer) })) { $foundNotConfigured = $true }
         if ($clusterHosts.Where({ $_.NtpdRunning -ne $true })) { $foundServiceStopped = $true }
         if (($clusterHosts.NtpServer | Select-Object -Unique).Count -gt 1) { $foundInconsistency = $true }
 
-        $uniqueNtpServers = $clusterHosts | ForEach-Object { if ($_) { $_.NtpServer.Trim() } } | Select-Object -Unique
+        $uniqueNtpServers = $clusterHosts | ForEach-Object { if ($_) { ([string]$_.NtpServer).Trim() } } | Select-Object -Unique
         $stoppedHosts = $clusterHosts | Where-Object { $_.NtpdRunning -ne $true }
 
         if ($uniqueNtpServers.Count -gt 1) {
@@ -272,9 +279,9 @@ function Test-HostDrivers($Context) {
 function Test-DnsConfiguration($Context) {
     $findings = @()
 
-    foreach ($clusterHosts in (Get-HostsByCluster (Import-RawSheet $Context.RawExcelPath "ESXi")).Values) {
+    foreach ($clusterHosts in (Get-HostsByCluster (Get-EsxiRows $Context)).Values) {
         $hasEmptyDns = $clusterHosts.Where({ [string]::IsNullOrEmpty($_.DnsServer) }).Count -gt 0
-        $isInconsistent = ($clusterHosts.DnsServer.Trim() | Select-Object -Unique).Count -gt 1
+        $isInconsistent = ($clusterHosts | ForEach-Object { ([string]$_.DnsServer).Trim() } | Select-Object -Unique).Count -gt 1
 
         if ($hasEmptyDns -or $isInconsistent) {
             $findings += $clusterHosts
@@ -494,7 +501,7 @@ function Test-VCenterCertificates($Context) {
 }
 
 function Test-EsxiCertificates($Context) {
-    $hosts = @(Import-RawSheet $Context.RawExcelPath "ESXi" | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) })
+    $hosts = @(Get-EsxiRows $Context | Where-Object { -not [string]::IsNullOrEmpty($_.vCenter) })
 
     if ($hosts.Count -eq 0) {
         return [PSCustomObject]@{ ID = "VSP-TR-08"; Resultado = "Excepción"; Detalle = "No se pudo recolectar información de los Hosts ESXi o la hoja está vacía." }
@@ -506,6 +513,7 @@ function Test-EsxiCertificates($Context) {
 
     $expiredCount = 0
     $expiringSoonCount = 0
+    $unreadableCount = 0
     $nearestExpiration = $null
 
     foreach ($row in $hosts) {
@@ -514,6 +522,7 @@ function Test-EsxiCertificates($Context) {
 
         if ([string]::IsNullOrEmpty($validTo) -or $validTo -eq "N/A") {
             $isFinding = $true
+            $unreadableCount++
         }
         else {
             try {
@@ -533,6 +542,7 @@ function Test-EsxiCertificates($Context) {
             }
             catch {
                 $isFinding = $true
+                $unreadableCount++
             }
         }
 
@@ -546,17 +556,29 @@ function Test-EsxiCertificates($Context) {
         }
     }
 
+    # Hosts whose certificate could not be read (usually the account lacks the Certificate.Manage
+    # privilege on the hosts) are not "valid": they are called out, and when none could be read
+    # there is nothing to vouch for
+    $unreadableNote = if ($unreadableCount -gt 0) { " No se pudo leer el certificado de $unreadableCount de $($hosts.Count) hosts (suele faltar el privilegio Certificate.Manage del usuario); revisarlos manualmente." } else { "" }
+
     $result = "Resultado Esperado"
     $detail = "Todos los certificados de host tienen vigencia mayor a 1 año."
 
     if ($expiredCount -gt 0) {
         $result = "Vencido"
-        $detail = "Se detectaron $expiredCount certificados de host ESXi ya expirados."
+        $detail = "Se detectaron $expiredCount certificados de host ESXi ya expirados.$unreadableNote"
     }
     elseif ($expiringSoonCount -gt 0) {
         $result = "Vencimiento < 1 Año"
         $nearestText = if ($nearestExpiration) { $nearestExpiration.ToString("yyyy-MM-dd") } else { "N/A" }
-        $detail = "Se detectaron $expiringSoonCount certificados próximos a vencer. El más próximo vence el $nearestText."
+        $detail = "Se detectaron $expiringSoonCount certificados próximos a vencer. El más próximo vence el $nearestText.$unreadableNote"
+    }
+    elseif ($unreadableCount -eq $hosts.Count) {
+        $result = "Excepción"
+        $detail = "No se pudo leer el certificado de ningún host (suele faltar el privilegio Certificate.Manage del usuario). Revisar manualmente."
+    }
+    elseif ($unreadableCount -gt 0) {
+        $detail = "Los certificados leídos tienen vigencia mayor a 1 año.$unreadableNote"
     }
 
     if ($findings.Count -gt 0) {
