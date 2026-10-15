@@ -30,8 +30,8 @@ collection makes to the environment). The rest of the alarm audit still runs.
 
 .EXAMPLE
 .\Start-Proactiva.ps1
-.\Start-Proactiva.ps1 -Client "Orbis" -Month "Octubre" -Frequency Quarterly -VCenters vc01.orbis.local
-.\Start-Proactiva.ps1 -ReportOnly -Client "Orbis" -Month "Octubre" -Frequency Quarterly
+.\Start-Proactiva.ps1 -Client "Cliente" -Month "Octubre" -Frequency Quarterly -VCenters vc01.cliente.local
+.\Start-Proactiva.ps1 -ReportOnly -Client "Cliente" -Month "Octubre" -Frequency Quarterly
 #>
 param(
     [string] $Client,
@@ -45,7 +45,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$global:APP_VERSION = "v3.0.0"
+$global:APP_VERSION = "v3.1.0"
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $runtimeModules = Join-Path $repoRoot 'runtime\Modules'

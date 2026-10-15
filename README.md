@@ -39,7 +39,7 @@ Si te equivocaste en el cliente, el mes o el tipo de proactiva, corré **`extra\
 `src\Start-Proactiva.ps1` acepta todo por parámetro; lo que no se pasa, lo pregunta. Correlo siempre con el PowerShell incluido:
 
 ```powershell
-.\runtime\pwsh.exe -ExecutionPolicy Bypass -File .\src\Start-Proactiva.ps1 -Client "Orbis" -Month "Octubre" -Frequency Quarterly -VCenters vc01.orbis.local,vc02.orbis.local
+.\runtime\pwsh.exe -ExecutionPolicy Bypass -File .\src\Start-Proactiva.ps1 -Client "Cliente" -Month "Octubre" -Frequency Quarterly -VCenters vc01.cliente.local,vc02.cliente.local
 ```
 
 | Parámetro | Para qué |
