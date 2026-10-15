@@ -57,6 +57,7 @@ $frequencyLabels = [ordered]@{
 }
 
 Import-Module (Join-Path $PSScriptRoot 'shared\RunFolder.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'shared\Exclusions.psm1') -Force
 
 # ---------------------------------------------------------------------------------------
 # Visit details: asked up front so the rest of the run is unattended
@@ -95,8 +96,20 @@ while (-not $Frequency) {
 
 if (-not $ReportOnly) {
     $VCenters = @($VCenters -join ',' -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    while ($VCenters.Count -eq 0) {
-        $VCenters = @((Read-Host "vCenters (separados por coma)") -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    while ($true) {
+        if ($VCenters.Count -eq 0) {
+            $VCenters = @((Read-Host "vCenters (separados por coma)") -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            continue
+        }
+
+        # Azure VMware Solution is run by Microsoft: it is not collected
+        $avsVCenters = @($VCenters | Where-Object { Test-IsAvsVCenter $_ })
+        if ($avsVCenters.Count -gt 0) {
+            Write-Host "Se omiten los vCenters de Azure VMware Solution (los gestiona Microsoft): $($avsVCenters -join ', ')" -ForegroundColor Yellow
+            $VCenters = @($VCenters | Where-Object { -not (Test-IsAvsVCenter $_) })
+            continue
+        }
+        break
     }
 }
 

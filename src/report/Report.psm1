@@ -3,6 +3,7 @@
 # with findings) and "Checklist Proactiva - <client> - <month>.xlsx" (result per checklist ID).
 
 Import-Module (Join-Path $PSScriptRoot '..\shared\ExcelStyle.psm1')
+Import-Module (Join-Path $PSScriptRoot '..\shared\Exclusions.psm1')
 
 . (Join-Path $PSScriptRoot 'checks\MonthlyChecks.ps1')
 . (Join-Path $PSScriptRoot 'checks\QuarterlyChecks.ps1')
@@ -86,6 +87,11 @@ function New-ProactivaReport {
     # Regenerating for the same client/month starts from a clean annex; otherwise Export-Excel
     # would reopen the old file and add to it
     if (Test-Path $context.AnnexPath) { Remove-Item $context.AnnexPath -Force }
+
+    $avsVCenters = Get-AvsVCenters -Path $RawExcelPath
+    if ($avsVCenters.Count -gt 0) {
+        Write-Host "Se excluyen del reporte los vCenters de Azure VMware Solution (los gestiona Microsoft): $($avsVCenters -join ', ')" -ForegroundColor Yellow
+    }
 
     # One failing check must not take the whole report down: it is logged, its checklist rows
     # are left blank with a note to review them by hand, and the other checks go on
@@ -302,8 +308,23 @@ function Import-RawSheet {
 
     if (-not $Path -or -not (Test-Path $Path)) { return }
     try {
-        Import-Excel -Path $Path -WorksheetName $WorksheetName -ErrorAction Stop
+        # Rows of Azure VMware Solution vCenters never reach a check (see Exclusions.psm1)
+        Import-Excel -Path $Path -WorksheetName $WorksheetName -ErrorAction Stop | Where-Object {
+            $vcenter = if ($_.PSObject.Properties['vCenter']) { $_.vCenter } else { $_.'vCenter Server' }
+            -not (Test-IsAvsVCenter $vcenter)
+        }
     } catch {}
+}
+
+# Names of the AVS vCenters present in a raw Excel, to tell the user what was left out
+function Get-AvsVCenters {
+    param([string] $Path)
+
+    if (-not $Path -or -not (Test-Path $Path)) { return @() }
+    try {
+        return @(Import-Excel -Path $Path -WorksheetName "vCenter" -ErrorAction Stop |
+            ForEach-Object { $_.'vCenter Server' } | Where-Object { Test-IsAvsVCenter $_ })
+    } catch { return @() }
 }
 
 # The "ESXi" sheet of the raw Excel without the virtual "hosts" that are not ESXi servers:
