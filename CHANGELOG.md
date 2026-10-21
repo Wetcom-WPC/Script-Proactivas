@@ -1,5 +1,12 @@
 # Historial de versiones
 
+## v3.2.1 (2026-10-21)
+
+Corrección para PCs que ya tienen VMware PowerCLI instalado.
+
+- En una PC con otra versión de PowerCLI instalada a nivel sistema (ej. 12.5 en `Program Files\WindowsPowerShell\Modules`), la recolección fallaba al arrancar con `Assembly with same name is already loaded`. Ahora el script y sus procesos de recolección ven únicamente los módulos de `runtime\Modules`, así que una instalación de PowerCLI de la PC ya no interfiere.
+- `extra\Preparar-Equipo.bat`: el aviso de "instalaciones de PowerCLI fuera del proyecto" ahora refleja esto y explica qué hacer si el error persiste.
+
 ## v3.2.0 (2026-10-15)
 
 Recolección mucho más rápida. Las hojas, columnas, valores y el orden de las filas no cambian: se validó contra v3.1.0 en un cliente real (2 vCenters, 10 hosts, 365 VMs, trimestral). Los datos de las dos versiones coinciden; solo cambia lo que se movió entre corrida y corrida (una VM que hizo vMotion, snapshots de los backups).

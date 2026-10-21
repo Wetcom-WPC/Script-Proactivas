@@ -66,8 +66,9 @@ if (-not $otherPowerCli) {
     $otherPowerCli | Select-Object Name, Version, ModuleBase -Unique | ForEach-Object {
         Write-Host "        - $($_.Name) $($_.Version)  ($($_.ModuleBase))" -ForegroundColor Yellow
     }
-    Write-Host "        No deberia causar problemas (el proyecto carga sus modulos por ruta completa," -ForegroundColor Yellow
-    Write-Host "        no por nombre), pero si algo falla mas abajo, puede ser un conflicto de versiones." -ForegroundColor Yellow
+    Write-Host "        El script ignora esas instalaciones (usa solo los modulos de runtime\Modules)." -ForegroundColor Yellow
+    Write-Host "        Si aun asi aparece 'Assembly with same name is already loaded', renombra o" -ForegroundColor Yellow
+    Write-Host "        desinstala esas carpetas VMware.* para descartar el conflicto de versiones." -ForegroundColor Yellow
 }
 
 # -----------------------------------------------------------------------

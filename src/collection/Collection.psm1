@@ -436,6 +436,8 @@ function Invoke-CollectionWorkers {
         # Same policy the launcher gives the main process (the files may carry the "downloaded
         # from the internet" mark); process scope only
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+        # Only the bundled modules, never a PowerCLI installed on the PC
+        $env:PSModulePath = $ModulesFolder
         $ErrorActionPreference = 'Continue'
         $connection = $null
         $cisConnection = $null
