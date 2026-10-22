@@ -1,5 +1,9 @@
 # Historial de versiones
 
+## v3.2.2 (2026-10-22)
+
+- Corrige el error `Index operation failed; the array index evaluated to null` en "Procesando adaptadores VMkernel". Un adaptador VMkernel conectado a un puerto distribuido que no pertenece a un port group (la clave del port group es opcional en vSphere) hacía fallar la recolección de todo el vCenter. Ahora ese adaptador sale con el nombre de port group vacío y la recolección continúa.
+
 ## v3.2.1 (2026-10-21)
 
 Corrección para PCs que ya tienen VMware PowerCLI instalado.

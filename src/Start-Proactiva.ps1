@@ -50,7 +50,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$global:APP_VERSION = "v3.2.1"
+$global:APP_VERSION = "v3.2.2"
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $runtimeModules = Join-Path $repoRoot 'runtime\Modules'

@@ -1694,7 +1694,10 @@ function Get-KernelAdapters {
                         $distributedPortGroups[$portGroup.Key] = $portGroup.Name
                     }
                 }
-                $portGroupName = $distributedPortGroups[$vnic.Spec.DistributedVirtualPort.PortgroupKey]
+                # PortgroupKey is optional (an adapter can sit on a distributed port that is not
+                # in a port group): the name stays empty, as the cmdlet leaves it
+                $portGroupKey = $vnic.Spec.DistributedVirtualPort.PortgroupKey
+                if (-not [string]::IsNullOrEmpty($portGroupKey)) { $portGroupName = $distributedPortGroups[$portGroupKey] }
             }
 
             $services = $servicesByDevice[$vnic.Device]
